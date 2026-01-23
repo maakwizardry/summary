@@ -1,0 +1,19 @@
+# EB will run npm install, so don't upload node_modules
+node_modules/
+
+# Don't upload documentation
+*.md
+!README.md
+
+# Don't upload local env file
+.env
+.env.local
+
+# Don't upload media files
+*.mp4
+*.png
+!utils/image.png
+
+# Don't upload git files
+.git
+.gitignore
