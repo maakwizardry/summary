@@ -17,9 +17,24 @@ dotenv.config();
 
 // Initialize app
 const app = express();
+
+// CORS Configuration
+const corsOptions = {
+  origin: [
+    'http://localhost:5173',        // Local development
+    'http://localhost:3000',        // Alternative local port
+    'https://briefme.vercel.app',   // Production frontend
+    'https://www.briefme.vercel.app'
+  ],
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
 // Middleware
 app.use(express.json()); // Parse JSON bodies
-app.use(cors());         // Enable CORS
+app.use(cors(corsOptions)); // Enable CORS with config
 app.use(morgan("dev"));  // Logger
 
 app.use("/api/users", UserRouter);
