@@ -8,7 +8,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 
 async function handleFiles(file, mimeType, length) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
   const chat = model.startChat({
     history: [
@@ -39,7 +39,7 @@ async function handleFiles(file, mimeType, length) {
 
 
 async function handleText(text) {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro" });
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
   const chat = model.startChat({
     history: [
