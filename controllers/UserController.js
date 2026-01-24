@@ -32,7 +32,7 @@ const register = async (req, res) => {
       email,
       password: hashedPassword,
       otp,
-      isVerified: false, // until OTP is verified
+      isVerified: true, // until OTP is verified
     });
 
     await newUser.save();
