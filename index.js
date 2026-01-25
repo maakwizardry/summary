@@ -21,10 +21,11 @@ const app = express();
 // CORS Configuration
 const corsOptions = {
   origin: [
-    'http://localhost:5173',        // Local development
-    'http://localhost:3000',        // Alternative local port
-    'https://briefme.vercel.app',   // Production frontend
-    'https://www.briefme.vercel.app'
+    'http://localhost:5173',        // Local development (Vite default)
+    'http://localhost:5174',        // Local development (alternative Vite port)
+    'http://localhost:3000',        // Alternative local port (React/Next.js)
+    'https://www.getsummaryapp.com', // Production frontend (new domain),
+    'https://getsummaryapp.com' // Production frontend (new domain)
   ],
   credentials: true,
   optionsSuccessStatus: 200,
