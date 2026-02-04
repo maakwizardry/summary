@@ -4,28 +4,29 @@ const path = require('path');
 dotenv.config();
 
 const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
 });
 
 // helper: generate OTP
 function generateOTP(length = 6) {
-    let otp = '';
-    for (let i = 0; i < length; i++) {
-        otp += Math.floor(Math.random() * 10);
-    }
-    return otp;
+  let otp = '';
+  for (let i = 0; i < length; i++) {
+    otp += Math.floor(Math.random() * 10);
+  }
+  return otp;
 }
 
-const sendMail = async ({ to, subject, otp,  name = "User" }) => {
-    const quote = "“Do not wait to strike till the iron is hot, but make it hot by striking.” — W.B. Yeats";
+const sendMail = async ({ to, subject, otp, name = "User" }) => {
+  return true;
+  const quote = "“Do not wait to strike till the iron is hot, but make it hot by striking.” — W.B. Yeats";
 
-    const html = `
+  const html = `
     <!doctype html>
     <html>
       <body style="margin:0;padding:0;background:#f4f6f8;">
@@ -83,30 +84,30 @@ const sendMail = async ({ to, subject, otp,  name = "User" }) => {
     </html>
     `;
 
-    const mails = {
-        from: process.env.EMAIL_USER,
-        to,
-        subject,
-        text: `Your OTP is: ${otp}\n\nQuote: ${quote}`, // plain text fallback
-        html,
-        attachments: [
-            {
-                filename: 'image.png',
-                path: path.join(__dirname, 'image.png'), // same folder as this file
-                cid: 'briefme-logo' // must match the cid used in <img src="cid:briefme-logo">
-            }
-        ]
-    };
+  const mails = {
+    from: process.env.EMAIL_USER,
+    to,
+    subject,
+    text: `Your OTP is: ${otp}\n\nQuote: ${quote}`, // plain text fallback
+    html,
+    attachments: [
+      {
+        filename: 'image.png',
+        path: path.join(__dirname, 'image.png'), // same folder as this file
+        cid: 'briefme-logo' // must match the cid used in <img src="cid:briefme-logo">
+      }
+    ]
+  };
 
-    try {
-        await transporter.sendMail(mails);
-        console.log(`✅ Email sent to ${to} with OTP: ${otp}`);
-        return otp; // return OTP so you can store/verify it
-    }
-    catch (e) {
-        console.error("❌ Email error:", e);
-        return null;
-    }
+  try {
+    await transporter.sendMail(mails);
+    console.log(`✅ Email sent to ${to} with OTP: ${otp}`);
+    return otp; // return OTP so you can store/verify it
+  }
+  catch (e) {
+    console.error("❌ Email error:", e);
+    return null;
+  }
 };
 
 module.exports = sendMail;

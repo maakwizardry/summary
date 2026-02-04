@@ -17,7 +17,7 @@ const register = async (req, res) => {
     // 2. Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ message: "Email already registered" });
+      return res.status(400).json({ message: "Email already registered", existingUser });
     }
 
     // 3. Hash the password
@@ -36,7 +36,7 @@ const register = async (req, res) => {
     });
 
     await newUser.save();
-    const status = sendMail({to : newUser.email, subject : "OTP verification", otp : newUser.otp});
+    const status = sendMail({ to: newUser.email, subject: "OTP verification", otp: newUser.otp });
 
     // 6. TODO: Send OTP via email or SMS (e.g., using nodemailer or Twilio)
 
@@ -146,11 +146,11 @@ const getUserProfile = async (req, res) => {
   if (!req.user) {
     return res.status(404).json({ message: "User not found" });
   }
-  
+
   res.status(200).json({
     id: req.user._id,
     email: req.user.email,
-    pro : req.user.pro,
+    pro: req.user.pro,
     name: req.user.name, // include other safe fields
   });
 };

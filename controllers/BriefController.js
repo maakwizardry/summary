@@ -1,9 +1,24 @@
 const fs = require("fs");
-const Tesseract = require("tesseract.js");
-const axios = require('axios');
+const { extractText, chunkText, embedText, cosineSimilarity } = require("../utils/Processing.js");
+const File = require("../models/File.js");
+const crypto = require("crypto");
+const Chunk = require("../models/Chunk.js");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const model = genAI.getGenerativeModel({
+  model: "gemini-2.5-flash",
+  generationConfig: {
+    temperature: 0.4,
+    topP: 0.95,
+    topK: 40,
+    maxOutputTokens: 8192,
+  }
+});
+
+
+
 
 // Helper function to detect file type category
 function getFileCategory(mimeType) {
@@ -14,19 +29,14 @@ function getFileCategory(mimeType) {
   return 'unknown';
 }
 
+
+
+
+
 async function handleFiles(file, mimeType, length) {
-  const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.5-flash",
-    generationConfig: {
-      temperature: 0.4,
-      topP: 0.95,
-      topK: 40,
-      maxOutputTokens: 8192,
-    }
-  });
 
   const fileCategory = getFileCategory(mimeType);
-  
+
   const systemPrompt = `You are an ENTERPRISE-LEVEL AI summarization specialist designed for professional business environments. Your summaries are used by executives, analysts, and decision-makers who require high-quality, actionable insights.
 
 🎯 YOUR MISSION: Transform content from various media formats into executive-level summaries that deliver maximum value in minimum time.
@@ -111,25 +121,16 @@ Begin your enterprise-level summary now:`;
       }
     }
   ]);
-  
+
   return result;
 }
 
 
 
 async function handleText(textInput) {
-  const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.5-flash",
-    generationConfig: {
-      temperature: 0.4,
-      topP: 0.95,
-      topK: 40,
-      maxOutputTokens: 8192,
-    }
-  });
 
 
-  
+
   const systemPrompt = `You are an ELITE TEXT ANALYSIS AI designed for enterprise environments. You transform raw text into executive-level summaries that professionals rely on for critical decision-making.
 
 🎯 YOUR ROLE: Analyze and synthesize text content into high-quality, actionable summaries for business professionals, researchers, and executives.
@@ -213,115 +214,291 @@ Begin your professional analysis now:`;
 
 
 
-
 processFiles = async (req, res) => {
   try {
-    const file = req.file?.buffer;
-    const mimeType = req.file?.mimetype;
-    const length = req.body.length || 200; // Default to 200 words if not specified
-
-    // Handle text input
-    if (req.body.text && req.body.textInput) {
-      console.log(`📝 Processing text input (${req.body.textInput.length} characters)`);
-      
-      if (!req.body.textInput.trim()) {
-        return res.status(400).json({ 
-          status: false, 
-          error: "Text input is empty" 
-        });
-      }
-
-      const response = await handleText(req.body.textInput);
-      const summary = response.response.text();
-      
-      console.log(`✅ Text summary generated (${summary.length} characters)`);
-      
-      return res.status(200).json({ 
-        status: true, 
-        extractedText: summary,
-        type: 'text',
-        wordCount: summary.split(/\s+/).length
-      });
-    }
-    
-    // Handle file upload
-    if (file && mimeType) {
-      const fileCategory = getFileCategory(mimeType);
-      const fileSizeKB = (file.length / 1024).toFixed(2);
-      
-      console.log(`📁 Processing ${fileCategory} file: ${mimeType} (${fileSizeKB} KB)`);
-
-      // Validate supported file types
-      const supportedTypes = [
-        'image/png', 'image/jpg', 'image/jpeg', 'image/gif', 'image/webp',
-        'video/mp4', 'video/avi', 'video/quicktime', 'video/webm',
-        'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/aac', 'audio/ogg',
-        'application/pdf', 'application/msword', 
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'text/plain'
-      ];
-
-      if (!supportedTypes.some(type => mimeType.includes(type.split('/')[1]))) {
-        return res.status(400).json({
-          status: false,
-          error: `Unsupported file type: ${mimeType}`,
-          supportedFormats: {
-            images: 'PNG, JPG, JPEG, GIF, WebP',
-            videos: 'MP4, AVI, MOV, WebM',
-            audio: 'MP3, WAV, AAC, OGG',
-            documents: 'PDF, DOC, DOCX, TXT'
-          }
-        });
-      }
-
-      const response = await handleFiles(file, mimeType, length);
-      const summary = response.response.text();
-      
-      console.log(`✅ ${fileCategory} summary generated (${summary.length} characters)`);
-      
-      return res.status(200).json({ 
-        status: true, 
-        extractedText: summary,
-        type: fileCategory,
-        mimeType: mimeType,
-        fileSize: fileSizeKB + ' KB',
-        wordCount: summary.split(/\s+/).length
+    const files = req.files; // array from multer
+    const user = req.user;   // from JWT middleware
+    const query = req.body.message;
+    let result = "";
+    if (!files || files.length === 0) {
+      return res.status(400).json({
+        status: false,
+        error: "No files uploaded"
       });
     }
 
-    // No valid input provided
-    return res.status(400).json({
-      status: false,
-      error: "No valid input provided. Please upload a file or provide text input."
+    console.log(files);
+    console.log(user);
+    // 🔹 STEP 1: store files + register memory
+    const storedFiles = [];
+
+    for (const file of files) {
+      console.log(file);
+      // 1. generate file_id
+      const fileId = crypto.randomUUID();
+
+      // 2. store file to disk (example)
+      const filePath = `uploads/${fileId}-${file.originalname}`;
+      fs.writeFileSync(filePath, file.buffer);
+
+      // 3. create DB record (pseudo)
+
+
+      const safeFilename = Buffer
+        .from(file.originalname, 'utf8')
+        .toString('utf8');
+
+      const extractedText = await extractText(file)     // 1 . text extraction 
+
+      if (!extractedText || !extractedText.trim()) {
+        console.warn("❌ No extractable text:", file.originalname);
+        continue; // ⛔ skip this file completely
+      }
+      console.log(extractedText);
+      const chunkedText = chunkText(extractedText);     // 2 . text chunking
+
+      if (!extractedText || extractedText.trim().length === 0) {
+        console.warn("No extractable text found:", file.originalname);
+
+        storedFiles.push({
+          file_id: fileDoc._id,
+          filename: file.originalname,
+          total_chunks: chunkedText.length,
+          status: "failed",
+        });
+        continue;
+      }
+
+      // store in file DB
+
+      const fileDoc = await File.create({
+        user_id: user._id,
+        filename: safeFilename,
+        path: filePath,
+        status: "uploaded",
+        mimetype: file.mimetype,
+        size: file.size,
+        total_chunks: chunkedText.length,
+      });
+
+
+
+
+      const chunkDocs = [];
+
+      for (let i = 0; i < chunkedText.length; i++) {
+        const chunk = chunkedText[i];
+
+        // 🚨 CRITICAL SAFETY CHECK
+        if (!chunk || !chunk.trim()) {
+          console.log(`⚠️ Skipping empty chunk at index ${i}`);
+          continue;
+        }
+
+        const vector = await embedText(chunk);
+
+        chunkDocs.push({
+          user_id: user._id,
+          file_id: fileDoc._id,
+          chunk_index: i,
+          text: chunk.trim(),
+          embedding: vector,
+        });
+      }
+
+      if (chunkDocs.length === 0) {
+        console.warn("⚠️ No valid chunks for:", file.originalname);
+        continue;
+      }
+
+
+      await Chunk.insertMany(chunkDocs);
+
+      storedFiles.push({
+        file_id: fileDoc._id,
+        filename: file.originalname,
+        total_chunks: chunkedText.length,
+        status: "uploaded",
+      });
+    }
+
+
+    const response = await respondHandler(query, user);
+
+
+
+
+
+
+    // 🔹 STEP 2: respond immediately
+    return res.status(200).json({
+      status: true,
+      message: "Files uploaded successfully",
+      files: storedFiles,
+      response,
     });
 
   } catch (error) {
-    console.error("❌ Error processing content:", error);
-    
-    // Handle specific Gemini API errors
-    if (error.message && error.message.includes('quota')) {
-      return res.status(429).json({
-        status: false,
-        error: "API quota exceeded. Please try again later.",
-        details: "The AI service has reached its rate limit. Please wait a few minutes and try again."
-      });
-    }
-
-    if (error.message && error.message.includes('not found')) {
-      return res.status(500).json({
-        status: false,
-        error: "AI model configuration error",
-        details: "The summarization service is temporarily unavailable. Please contact support."
-      });
-    }
-
-    // Generic error response
+    console.error("Upload error:", error);
     return res.status(500).json({
       status: false,
-      error: "Failed to process content",
-      message: error.message || "An unexpected error occurred"
+      error: "File upload failed"
     });
   }
 };
 
-module.exports = { processFiles };
+const respondHandler = async (query, user) => {
+
+
+  const questionEmbedding = await embedText(query);     // step 1 : embed the query
+
+  // step 2 : fetch chunks 
+
+  const queryFilter = {
+    user_id: user._id
+  };
+
+  const chunks = await Chunk.find(queryFilter);
+
+  const scoredChunks = chunks
+    .map(chunk => {
+      const score = cosineSimilarity(questionEmbedding, chunk.embedding);
+      return score > 0.2 ? { text: chunk.text, score } : null;
+    })
+    .filter(Boolean);
+
+
+  const topChunks = [];
+
+  for (const c of scoredChunks) {
+    if (topChunks.length < 5) {
+      topChunks.push(c);
+      topChunks.sort((a, b) => b.score - a.score);
+    } else if (c.score > topChunks[4].score) {
+      topChunks[4] = c;
+      topChunks.sort((a, b) => b.score - a.score);
+    }
+  }
+
+
+  if (!topChunks.length || topChunks[0].score < 0.30) {
+    return "I’m unable to find relevant information for this question in the uploaded documents.";
+  }
+
+
+
+  console.log(scoredChunks);
+
+  const context = topChunks
+    .map((c, i) => `Context ${i + 1}:\n${c.text}`)
+    .join("\n\n");
+
+
+  const prompt = `
+You are a professional AI assistant.
+
+Answer the user's question using ONLY the information provided in the context below.
+Do not use any information outside the context you can explain in your way to user but clearly.
+
+If the answer is not clearly present in the context, respond exactly with:
+"I’m unable to find relevant information about " mentioned user current topic " the topic in the uploaded documents."
+but mostly try to find the answer from the context. even though the relevent match . if the user question like ( hi , thankyou , hello , hey , good morning , good afternoon , good evening , good night , bye , ... etc) is about greetings just greet the user and say you can ask me about the uploaded documents.
+
+Formatting and style rules:
+- Write in clear, professional English.
+- Use plain sentences only.
+- Do NOT use bullet points, symbols, asterisks (*), slashes (/), markdown, or emojis.
+- Do NOT include headings, labels, or references to the context.
+- Do NOT mention sources, context numbers, or internal system details.
+- Keep the response concise, accurate, and well-structured in paragraph form.
+
+Accuracy rules:
+- Do not guess, assume, or add extra details.
+- Do not exaggerate or generalize.
+- Base every statement strictly on the provided context.
+
+Context:
+${context}
+
+Question:
+${query}
+
+Answer:
+`;
+
+
+
+  const result = await model.generateContent(prompt);
+  const answer = result.response.text();
+  console.log(answer);
+  return answer;
+}
+
+
+const respond = async (req, res) => {
+  const query = req.body.query;
+  const user = req.user;
+
+  if (!query) {
+    return res.status(400).json({
+      status: false,
+      error: "Question is required"
+    });
+  }
+
+  const response = await respondHandler(query, user);
+  return res.json({ message: "Response generated successfully", query, response });
+
+}
+
+const deleteFiles = async (req, res) => {
+  try {
+    const { fileId } = req.params;
+    const user = req.user;
+
+    if (!fileId) {
+      return res.status(400).json({
+        status: false,
+        error: "File ID is required",
+      });
+    }
+
+    // 1️⃣ Find file (and verify ownership)
+    const file = await File.findOne({
+      _id: fileId,
+      user_id: user._id,
+    });
+
+    if (!file) {
+      return res.status(404).json({
+        status: false,
+        error: "File not found",
+      });
+    }
+
+    // 2️⃣ Delete physical file (if exists)
+    if (file.path && fs.existsSync(file.path)) {
+      fs.unlinkSync(file.path);
+    }
+
+    // 3️⃣ Delete all related chunks
+    await Chunk.deleteMany({ file_id: file._id });
+
+    // 4️⃣ Delete file record
+    await File.deleteOne({ _id: file._id });
+
+    return res.status(200).json({
+      status: true,
+      message: "File deleted successfully",
+    });
+
+  } catch (error) {
+    console.error("Delete file error:", error);
+    return res.status(500).json({
+      status: false,
+      error: "Failed to delete file",
+    });
+  }
+}
+
+module.exports = { processFiles, respond, deleteFiles };
