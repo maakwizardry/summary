@@ -25,7 +25,6 @@ const FileSchema = new mongoose.Schema(
 
         status: {
             type: String,
-            enum: ["uploaded", "indexing", "ready", "failed"],
             default: "uploaded"
         },
 

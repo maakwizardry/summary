@@ -50,12 +50,16 @@ function normalizeText(text) {
 function chunkText(text, maxChars = 1200, overlap = 200) {
     if (!text || !text.trim()) return [];
 
-    // Normalize whitespace aggressively (PDF-safe)
     const clean = text
         .replace(/\r/g, "")
         .replace(/\n{2,}/g, "\n")
         .replace(/\s+/g, " ")
         .trim();
+
+    // 🔥 If the document is small, keep it as ONE chunk
+    if (clean.length <= maxChars) {
+        return [clean];
+    }
 
     const chunks = [];
     let start = 0;
@@ -64,7 +68,8 @@ function chunkText(text, maxChars = 1200, overlap = 200) {
         const end = start + maxChars;
         const chunk = clean.slice(start, end).trim();
 
-        if (chunk.length > 50) { // 🚨 minimum semantic size
+        // Allow small chunks ONLY if it's the last one
+        if (chunk.length > 50 || end >= clean.length) {
             chunks.push(chunk);
         }
 

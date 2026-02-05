@@ -233,94 +233,94 @@ processFiles = async (req, res) => {
     const storedFiles = [];
 
     for (const file of files) {
-      console.log(file);
-      // 1. generate file_id
       const fileId = crypto.randomUUID();
-
-      // 2. store file to disk (example)
       const filePath = `uploads/${fileId}-${file.originalname}`;
       fs.writeFileSync(filePath, file.buffer);
 
-      // 3. create DB record (pseudo)
-
-
       const safeFilename = Buffer
-        .from(file.originalname, 'utf8')
-        .toString('utf8');
+        .from(file.originalname, "utf8")
+        .toString("utf8");
 
-      const extractedText = await extractText(file)     // 1 . text extraction 
-
-      if (!extractedText || !extractedText.trim()) {
-        console.warn("❌ No extractable text:", file.originalname);
-        continue; // ⛔ skip this file completely
-      }
-      console.log(extractedText);
-      const chunkedText = chunkText(extractedText);     // 2 . text chunking
-
-      if (!extractedText || extractedText.trim().length === 0) {
-        console.warn("No extractable text found:", file.originalname);
-
-        storedFiles.push({
-          file_id: fileDoc._id,
-          filename: file.originalname,
-          total_chunks: chunkedText.length,
-          status: "failed",
-        });
-        continue;
-      }
-
-      // store in file DB
-
+      // 1️⃣ Create DB record FIRST
       const fileDoc = await File.create({
         user_id: user._id,
         filename: safeFilename,
         path: filePath,
-        status: "uploaded",
+        status: "processing",
         mimetype: file.mimetype,
         size: file.size,
-        total_chunks: chunkedText.length,
+        total_chunks: 0,
       });
 
+      // 2️⃣ Extract text
+      const extractedText = await extractText(file);
 
+      if (!extractedText || !extractedText.trim()) {
+        await File.updateOne(
+          { _id: fileDoc._id },
+          { status: "failed" }
+        );
 
+        storedFiles.push({
+          file_id: fileDoc._id,
+          filename: safeFilename,
+          status: "failed",
+          reason: "Empty or unsupported content"
+        });
+
+        continue;
+      }
+
+      // 3️⃣ Chunk safely
+      let chunkedText = chunkText(extractedText);
+      if (!chunkedText.length) {
+        chunkedText = [extractedText.trim()];
+      }
 
       const chunkDocs = [];
 
       for (let i = 0; i < chunkedText.length; i++) {
         const chunk = chunkedText[i];
-
-        // 🚨 CRITICAL SAFETY CHECK
-        if (!chunk || !chunk.trim()) {
-          console.log(`⚠️ Skipping empty chunk at index ${i}`);
-          continue;
-        }
+        if (!chunk.trim()) continue;
 
         const vector = await embedText(chunk);
 
         chunkDocs.push({
           user_id: user._id,
           file_id: fileDoc._id,
+          filename: safeFilename, // ✅ IMPORTANT
           chunk_index: i,
           text: chunk.trim(),
           embedding: vector,
         });
       }
 
-      if (chunkDocs.length === 0) {
-        console.warn("⚠️ No valid chunks for:", file.originalname);
+      if (!chunkDocs.length) {
+        await File.updateOne(
+          { _id: fileDoc._id },
+          { status: "failed" }
+        );
         continue;
       }
 
-
       await Chunk.insertMany(chunkDocs);
+
+      await File.updateOne(
+        { _id: fileDoc._id },
+        {
+          status: "indexed",
+          total_chunks: chunkDocs.length
+        }
+      );
 
       storedFiles.push({
         file_id: fileDoc._id,
-        filename: file.originalname,
-        total_chunks: chunkedText.length,
-        status: "uploaded",
+        filename: safeFilename,
+        total_chunks: chunkDocs.length,
+        status: "indexed",
       });
     }
+
 
 
     const response = await respondHandler(query, user);
@@ -347,7 +347,7 @@ processFiles = async (req, res) => {
   }
 };
 
-const respondHandler = async (query, user) => {
+const respondHandler = async (query, user, selectedFiles = []) => {
 
 
   const questionEmbedding = await embedText(query);     // step 1 : embed the query
@@ -357,6 +357,10 @@ const respondHandler = async (query, user) => {
   const queryFilter = {
     user_id: user._id
   };
+
+  if (selectedFiles.length > 0) {
+    queryFilter.file_id = { $in: selectedFiles };
+  }
 
   const chunks = await Chunk.find(queryFilter);
 
@@ -380,51 +384,66 @@ const respondHandler = async (query, user) => {
     }
   }
 
+  console.log(topChunks);
 
-  if (!topChunks.length || topChunks[0].score < 0.30) {
-    return "I’m unable to find relevant information for this question in the uploaded documents.";
-  }
+
+
+
 
 
 
   console.log(scoredChunks);
 
-  const context = topChunks
-    .map((c, i) => `Context ${i + 1}:\n${c.text}`)
-    .join("\n\n");
+  // if (!topChunks.length) {
+  //   return "I’m unable to find relevant information about the requested topic in the uploaded documents.";
+  // }
+
+
+  const context =
+    selectedFiles.length > 0
+      ? topChunks.map(c => `From ${c.filename}:\n${c.text}`).join("\n\n")
+      : topChunks.map((c, i) => `Context ${i + 1}:\n${c.text}`).join("\n\n");
+
+
 
 
   const prompt = `
-You are a professional AI assistant.
+You are a professional AI assistant called BriefMe AI.
 
-Answer the user's question using ONLY the information provided in the context below.
-Do not use any information outside the context you can explain in your way to user but clearly.
+Answer the user's question using only the information provided in the context below.
+Do not use any knowledge that is not present in the context.
+You may clearly restate, summarize, or explain the information that is available in the context.
 
-If the answer is not clearly present in the context, respond exactly with:
-"I’m unable to find relevant information about " mentioned user current topic " the topic in the uploaded documents."
-but mostly try to find the answer from the context. even though the relevent match . if the user question like ( hi , thankyou , hello , hey , good morning , good afternoon , good evening , good night , bye , ... etc) is about greetings just greet the user and say you can ask me about the uploaded documents.
+If the context contains no information that is relevant to the user's question, respond exactly with:
+"I’m unable to find relevant information about the requested topic in the uploaded documents."
 
-Formatting and style rules:
-- Write in clear, professional English.
-- Use plain sentences only.
-- Do NOT use bullet points, symbols, asterisks (*), slashes (/), markdown, or emojis.
-- Do NOT include headings, labels, or references to the context.
-- Do NOT mention sources, context numbers, or internal system details.
-- Keep the response concise, accurate, and well-structured in paragraph form.
+If the context contains related facts but does not fully answer the user's question, respond by explaining only what information is available from the context, without adding assumptions or external details.
+
+If the user's input is a greeting, respond with a brief, friendly greeting.
+After the greeting, include a short sentence inviting the user to ask about their documents or findings.
+This follow-up sentence must vary in wording and tone each time and must not reuse the same phrasing.
+
+Style and formatting rules:
+Write in clear, professional English using plain sentences.
+Do not use bullet points, symbols, markdown, emojis, or special formatting.
+Do not include headings, labels, references, or mentions of the context or sources.
+Keep the response concise and written in paragraph form.
 
 Accuracy rules:
-- Do not guess, assume, or add extra details.
-- Do not exaggerate or generalize.
-- Base every statement strictly on the provided context.
+Do not guess or speculate.
+Do not introduce information that is not explicitly present in the context.
+Every statement must be directly supported by the context.
 
 Context:
 ${context}
 
-Question:
+User question:
 ${query}
 
 Answer:
+
 `;
+
 
 
 
@@ -436,7 +455,7 @@ Answer:
 
 
 const respond = async (req, res) => {
-  const query = req.body.query;
+  const { query, selectedFiles = [] } = req.body;
   const user = req.user;
 
   if (!query) {
@@ -446,7 +465,7 @@ const respond = async (req, res) => {
     });
   }
 
-  const response = await respondHandler(query, user);
+  const response = await respondHandler(query, user, selectedFiles);
   return res.json({ message: "Response generated successfully", query, response });
 
 }
@@ -501,4 +520,57 @@ const deleteFiles = async (req, res) => {
   }
 }
 
-module.exports = { processFiles, respond, deleteFiles };
+const renameFile = async (req, res) => {
+  try {
+    const { fileId } = req.params;
+    const { filename } = req.body;
+    const user = req.user;
+
+
+    if (!fileId) {
+      return res.status(400).json({
+        status: false,
+        error: "File ID is required",
+      });
+    }
+
+    if (!filename) {
+      return res.status(400).json({
+        status: false,
+        error: "Filename is required",
+      });
+    }
+
+    // 1️⃣ Find file (and verify ownership)
+    const file = await File.findOne({
+      _id: fileId,
+      user_id: user._id,
+    });
+
+    if (!file) {
+      return res.status(404).json({
+        status: false,
+        error: "File not found",
+      });
+    }
+
+    // 2️⃣ Update filename
+    file.filename = filename;
+    await file.save();
+
+    return res.status(200).json({
+      status: true,
+      message: "File renamed successfully",
+      file,
+    });
+
+  } catch (error) {
+    console.error("Rename file error:", error);
+    return res.status(500).json({
+      status: false,
+      error: "Failed to rename file",
+    });
+  }
+}
+
+module.exports = { processFiles, respond, deleteFiles, renameFile };
