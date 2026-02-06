@@ -426,23 +426,41 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   };
 
   // return console.log(queryFilter);
+  filename = "";
 
   if (selectedFiles.length > 0) {
     queryFilter.file_id = { $in: selectedFiles };
   }
 
   const chunks = await Chunk.find(queryFilter);
+  if (chunks) {
+    const file_id = chunks[0].file_id;
+    const file = await File.findById(file_id);
+    filename = file.filename;
+  }
 
 
 
   const MIN_SCORE = 0.25;
 
-  const scoredChunks = chunks
-    .map(chunk => {
+  const scoredChunks = await Promise.all(
+    chunks.map(async (chunk) => {
       const score = cosineSimilarity(questionEmbedding, chunk.embedding);
-      return { text: chunk.text, score, filename: chunk.filename };
+
+      if (score < MIN_SCORE) return null;
+
+      const file = await File.findById(chunk.file_id).select("filename");
+
+      return {
+        text: chunk.text,
+        score,
+        filename: file?.filename || "Unknown file",
+      };
     })
-    .filter(c => c.score >= MIN_SCORE);
+  );
+
+  const filteredResults = scoredChunks.filter(Boolean);
+
 
 
 
