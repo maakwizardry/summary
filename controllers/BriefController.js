@@ -3,7 +3,10 @@ const { extractText, chunkText, embedText, cosineSimilarity } = require("../util
 const File = require("../models/File.js");
 const crypto = require("crypto");
 const Chunk = require("../models/Chunk.js");
+const cloudinary = require("cloudinary").v2;
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const streamifier = require("streamifier");
+
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -13,10 +16,15 @@ const model = genAI.getGenerativeModel({
     temperature: 0.4,
     topP: 0.95,
     topK: 40,
-    maxOutputTokens: 8192,
+    maxOutputTokens: 2200,
   }
 });
 
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 
 
 
@@ -27,6 +35,25 @@ function getFileCategory(mimeType) {
   if (mimeType.startsWith('audio/')) return 'audio';
   if (mimeType.includes('pdf') || mimeType.includes('document') || mimeType.includes('text')) return 'document';
   return 'unknown';
+}
+
+
+function uploadToCloudinary(buffer, filename) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: "briefme-documents",
+        resource_type: "raw", // IMPORTANT for PDFs/DOCX
+        public_id: filename.replace(/\.[^/.]+$/, ""), // remove extension
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result);
+      }
+    );
+
+    streamifier.createReadStream(buffer).pipe(stream);
+  });
 }
 
 
@@ -235,7 +262,27 @@ processFiles = async (req, res) => {
     for (const file of files) {
       const fileId = crypto.randomUUID();
       const filePath = `uploads/${fileId}-${file.originalname}`;
-      fs.writeFileSync(filePath, file.buffer);
+      let cloudResult;
+
+      try {
+        cloudResult = await uploadToCloudinary(
+          file.buffer,
+          file.originalname
+        );
+      } catch (err) {
+        console.error("Cloudinary upload failed:", err);
+
+        storedFiles.push({
+          filename: file.originalname,
+          status: "failed",
+          reason: "Cloud upload failed"
+        });
+
+        continue; // ⬅️ IMPORTANT: skip this file
+      }
+
+
+      console.log(cloudResult);
 
       const safeFilename = Buffer
         .from(file.originalname, "utf8")
@@ -245,7 +292,8 @@ processFiles = async (req, res) => {
       const fileDoc = await File.create({
         user_id: user._id,
         filename: safeFilename,
-        path: filePath,
+        cloudinary_url: cloudResult.secure_url,
+        cloudinary_id: cloudResult.public_id,
         status: "processing",
         mimetype: file.mimetype,
         size: file.size,
@@ -321,21 +369,11 @@ processFiles = async (req, res) => {
       });
     }
 
-
-
-    const response = await respondHandler(query, user);
-
-
-
-
-
-
     // 🔹 STEP 2: respond immediately
     return res.status(200).json({
       status: true,
       message: "Files uploaded successfully",
       files: storedFiles,
-      response,
     });
 
   } catch (error) {
@@ -347,10 +385,39 @@ processFiles = async (req, res) => {
   }
 };
 
+
+function normalizeQuery(q) {
+  return q.toLowerCase().trim();
+}
+
+function normalize(vec) {
+  const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
+  return norm === 0 ? vec : vec.map(v => v / norm);
+}
+
+
+function extractFileRefs(query) {
+  const regex = /@([\w\-_.]+?\.(pdf|docx|txt))/gi;
+  return [...query.matchAll(regex)].map(m => m[1]);
+}
+
+
+
+
+
 const respondHandler = async (query, user, selectedFiles = []) => {
 
 
+  console.log("iam response handler")
+
+  // step 1  : intend detection 
+
+  // return console.log(user);
+
+
+
   const questionEmbedding = await embedText(query);     // step 1 : embed the query
+
 
   // step 2 : fetch chunks 
 
@@ -358,18 +425,27 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     user_id: user._id
   };
 
+  // return console.log(queryFilter);
+
   if (selectedFiles.length > 0) {
     queryFilter.file_id = { $in: selectedFiles };
   }
 
   const chunks = await Chunk.find(queryFilter);
 
+
+
+  const MIN_SCORE = 0.25;
+
   const scoredChunks = chunks
     .map(chunk => {
       const score = cosineSimilarity(questionEmbedding, chunk.embedding);
-      return score > 0.2 ? { text: chunk.text, score } : null;
+      return { text: chunk.text, score, filename: chunk.filename };
     })
-    .filter(Boolean);
+    .filter(c => c.score >= MIN_SCORE);
+
+
+
 
 
   const topChunks = [];
@@ -379,14 +455,16 @@ const respondHandler = async (query, user, selectedFiles = []) => {
       topChunks.push(c);
       topChunks.sort((a, b) => b.score - a.score);
     } else if (c.score > topChunks[4].score) {
-      topChunks[4] = c;
+      topChunks[4] = c;   // ✅ replace the WORST chunk
       topChunks.sort((a, b) => b.score - a.score);
     }
   }
 
-  console.log(topChunks);
 
 
+
+
+  // return console.log(topChunks)
 
 
 
@@ -401,7 +479,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   const context =
     selectedFiles.length > 0
-      ? topChunks.map(c => `From ${c.filename}:\n${c.text}`).join("\n\n")
+      ? topChunks.map(c => `context ${i + 1}:\n${c.text}`).join("\n\n")
       : topChunks.map((c, i) => `Context ${i + 1}:\n${c.text}`).join("\n\n");
 
 
@@ -410,29 +488,42 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   const prompt = `
 You are a professional AI assistant called BriefMe AI.
 
-Answer the user's question using only the information provided in the context below.
-Do not use any knowledge that is not present in the context.
-You may clearly restate, summarize, or explain the information that is available in the context.
+Your task is to answer the user's question using ONLY the information provided in the context.
 
-If the context contains no information that is relevant to the user's question, respond exactly with:
+Interpret the user's question by meaning, not exact wording.
+If different words or phrases clearly refer to the same concept or role described in the context,
+treat them as equivalent.
+Rewrite the user query to include equivalent phrases
+that may appear in formal documents.
+
+Do not change intent.
+Do not add new meaning.
+
+Examples (do not mention these in the answer):
+- creator, builder, author, developer → same role if context supports it
+- app, system, project → same entity if context defines one clearly
+
+Rules:
+- Do NOT use external knowledge
+- Do NOT invent facts
+- Do NOT guess missing information
+- Only answer if the context reasonably supports the user's intent
+
+If the context does NOT support the user's intent by meaning, respond EXACTLY with:
 "I’m unable to find relevant information about the requested topic in the uploaded documents."
 
-If the context contains related facts but does not fully answer the user's question, respond by explaining only what information is available from the context, without adding assumptions or external details.
+If the context partially answers the question:
+- Answer only with what is supported
+- Do not fill gaps or assume details
 
-If the user's input is a greeting, respond with a brief, friendly greeting.
-After the greeting, include a short sentence inviting the user to ask about their documents or findings.
-This follow-up sentence must vary in wording and tone each time and must not reuse the same phrasing.
-
-Style and formatting rules:
-Write in clear, professional English using plain sentences.
-Do not use bullet points, symbols, markdown, emojis, or special formatting.
-Do not include headings, labels, references, or mentions of the context or sources.
-Keep the response concise and written in paragraph form.
+Style rules:
+- Clear, professional English
+- Single paragraph
+- No bullets, markdown, emojis, headings, or source mentions
 
 Accuracy rules:
-Do not guess or speculate.
-Do not introduce information that is not explicitly present in the context.
-Every statement must be directly supported by the context.
+- Every fact must be grounded in the context
+- No speculation
 
 Context:
 ${context}
@@ -441,8 +532,8 @@ User question:
 ${query}
 
 Answer:
-
 `;
+
 
 
 
@@ -454,10 +545,286 @@ Answer:
 }
 
 
-const respond = async (req, res) => {
-  const { query, selectedFiles = [] } = req.body;
-  const user = req.user;
+async function fetchFileChunks(fileId, userId) {
+  return await Chunk.find({
+    file_id: fileId,
+    user_id: userId
+  }).sort({ chunk_index: 1 }).limit(12);
+}
 
+
+
+
+async function summarizeChunkBatch(text) {
+  const prompt = `
+Summarize the following content clearly and factually.
+Do not add new information.
+Do not infer or analyze.
+Preserve numbers, facts, and statements exactly as written.
+
+Content:
+${text}
+
+Summary:
+`;
+
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
+
+
+
+function batchChunks(chunks, batchSize = 5) {
+  const batches = [];
+  for (let i = 0; i < chunks.length; i += batchSize) {
+    batches.push(chunks.slice(i, i + batchSize));
+  }
+  return batches;
+}
+
+
+// async function safeGenerate(prompt, retries = 3) {
+//   try {
+//     return await model.generateContent(prompt);
+//   } catch (err) {
+//     if (err.message.includes("429") && retries > 0) {
+//       await new Promise(r => setTimeout(r, 60000));
+//       return safeGenerate(prompt, retries - 1);
+//     }
+//     throw err;
+//   }
+// }
+
+
+// main function 1 
+
+async function summarizeFilesByIds(fileIds, user) {
+  if (!fileIds.length) {
+    return "Please select a document using @filename.";
+  }
+
+
+  let allMiniSummaries = [];
+
+  for (const fileId of fileIds) {
+    const file = await File.findOne({
+      _id: fileId,
+      user_id: user._id
+    });
+
+    if (!file) continue;
+
+    const chunks = await Chunk.find({
+      file_id: file._id,
+      user_id: user._id
+    }).sort({ chunk_index: 1 });
+
+    if (!chunks.length) continue;
+
+    const batches = batchChunks(chunks, 5);
+
+    for (const batch of batches) {
+      const text = batch.map(c => c.text).join("\n");
+      const mini = await summarizeChunkBatch(text);
+      allMiniSummaries.push(mini);
+    }
+  }
+
+  if (!allMiniSummaries.length) {
+    return "Unable to generate summary from the selected document.";
+  }
+
+  const finalPrompt = `
+Combine the following summaries into a final clear summary.
+Do not add new information.
+
+${allMiniSummaries.join("\n\n")}
+`;
+
+  const result = await model.safeGenerate(finalPrompt);
+  return result.response.text();
+}
+
+
+async function summarizeFiles(fileNames, user) {
+  const files = await File.find({
+    user_id: user._id,
+    filename: { $in: fileNames }
+  });
+
+  if (!files.length) {
+    return "I’m unable to find the requested file in your uploaded documents.";
+  }
+
+  let combinedText = "";
+
+  for (const file of files) {
+    const chunks = await fetchFileChunks(file._id, user._id);
+
+    for (const chunk of chunks) {
+      combinedText += chunk.text + "\n\n";
+    }
+  }
+
+  // 🔥 SAFETY CHECK
+  if (!combinedText.trim()) {
+    return "No meaningful content found in the document.";
+  }
+
+  const prompt = `
+Summarize the following document clearly and accurately.
+
+Rules:
+- Do not add new information
+- Do not assume anything
+- Keep it concise but complete
+- Preserve facts, numbers, and intent
+
+Document content:
+${combinedText}
+
+Summary:
+`;
+
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
+
+async function summarizeFilesByNames(query, fileId, user) {
+
+
+
+
+
+  console.log(user);
+  // return console.log(fileNames);
+  const files = await File.find({
+    user_id: user._id,
+    _id: { $in: fileId }
+  });
+  // return console.log(files);
+
+  if (!files.length) {
+    return "I’m unable to find the requested file in your uploaded documents.";
+  }
+
+  let combinedText = "";
+
+  for (const file of files) {
+    combinedText += `Document Name: ${file.filename}\n`;
+
+    const chunks = await Chunk.find({
+      file_id: file._id,
+      user_id: user._id
+    })
+      .sort({ chunk_index: 1 })
+      .limit(6);
+
+    for (const chunk of chunks) {
+      combinedText += chunk.text + "\n";
+    }
+
+    combinedText += "\n\n"; // separate documents
+  }
+
+
+  if (!combinedText.trim()) {
+    return "No meaningful content found in the document.";
+  }
+  const prompt = `
+You are BriefMe AI, a professional document analysis assistant.
+
+You are given document content extracted from user-uploaded files.
+Each document is clearly labeled with its filename.
+if the user ask for comparisn show clearly by comparing , if the user ask for summary show clearly the summary based on user query .
+
+You MUST follow the output structure EXACTLY.
+Do not use markdown or special formatting.
+
+ALLOWED FORMATTING:
+- Plain text
+- Paragraphs
+- Bullet points alone
+- Line breaks
+
+OUTPUT STRUCTURE (repeat for EACH document):
+
+File: <filename>
+
+Summary:
+Write a clear paragraph summarizing the document.
+
+Key Points:
+• List the most important ideas or findings and make bold for those words which is important so that user can catch attention
+• Keep points concise and factual
+• Do not repeat sentences from the summary
+
+Important Details:
+• Mention technical, architectural, or factual details if present
+• Preserve names, technologies, and processes
+• Do not invent information
+no mark downs , no emoji no other signs !! ( should not use ** , * )
+
+You can ask questions like:
+• Suggest relevant questions the user can ask based on this document
+• Questions must be answerable from the document content
+• Do not suggest generic questions
+
+RULES:
+- Do NOT use markdown (no ###, **, tables, or code blocks)
+- Do NOT use emojis or symbols other than •
+- Do NOT merge documents unless explicitly asked
+- Do NOT add assumptions or external knowledge
+- Maintain clean spacing between sections
+
+DOCUMENTS:
+${combinedText}
+
+User request:
+"${query}"
+
+Answer:
+`;
+
+
+
+  const result = await model.generateContent(prompt);
+  return result.response.text();
+}
+
+
+
+async function detectIntentWithGemini(query) {
+  const prompt = `
+Classify the user's intent into ONE of the following labels:
+
+- SUMMARIZE
+- QUESTION
+
+Rules:
+- If the user provides a filename and asks to summarize and If the user provides filename or user does not want to search for specific topics in the file he just want (summarization, compare , difference or related to this etc much more) for files → SUMMARIZE else QUESTION
+- Output ONLY the intent label
+
+User input:
+"${query}"
+
+Intent:
+`;
+
+  const result = await model.generateContent(prompt);
+  return result.response.text().trim();
+}
+
+
+
+
+
+const respond = async (req, res) => {
+  const { query, file, selectedFiles = [] } = req.body;
+
+
+  const user = req.user;
+  console.log(selectedFiles);
   if (!query) {
     return res.status(400).json({
       status: false,
@@ -465,10 +832,46 @@ const respond = async (req, res) => {
     });
   }
 
-  const response = await respondHandler(query, user, selectedFiles);
-  return res.json({ message: "Response generated successfully", query, response });
+  // 🔥 STEP 0: detect intent FIRST
+  const intent = await detectIntentWithGemini(query);
+  let response;
 
-}
+  if (
+    intent === "SUMMARIZE" &&
+    selectedFiles.length === 1   // mentioned files
+  ) {
+    // Fetch selected file name
+    const selectedFile = await File.findOne({
+      _id: selectedFiles[0],
+      user_id: user._id
+    });
+
+    if (
+      selectedFile &&
+      file.fileId !== selectedFiles[0]
+    ) {
+      return res.json({
+        intent,
+        conflict: true,
+        response: `I couldn’t find the file "${selectedFile.filename}". Please confirm which file you want to summarize and try selecting it again from the available options.`
+
+      });
+    }
+
+    response = await summarizeFilesByNames(query, selectedFiles, user);
+  }
+  else {
+    // QUESTION / EXPLAIN → use embeddings
+    response = await respondHandler(query, user, file);
+  }
+
+  return res.json({
+    intent,
+    selectedFiles,
+    response
+  });
+};
+
 
 const deleteFiles = async (req, res) => {
   try {

@@ -5,7 +5,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const embeddingModel = genAI.getGenerativeModel({
-    model: "text-embedding-004"
+    model: "gemini-embedding-001",
 });
 
 
@@ -36,13 +36,9 @@ async function extractText(file) {
 }
 
 
-function normalizeText(text) {
-    return text
-        .replace(/\r\n/g, "\n")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{2,}/g, "\n\n")
-        .trim();
-}
+
+
+
 
 
 // ---------------- CHUNKING ----------------
@@ -83,10 +79,16 @@ function chunkText(text, maxChars = 1200, overlap = 200) {
 async function embedText(text) {
     if (!text || !text.trim()) return null;
 
-    const safeText = text.slice(0, 3000); // safety cap
+    const safeText = text.slice(0, 3000);
 
     try {
-        const result = await embeddingModel.embedContent(safeText);
+        const result = await embeddingModel.embedContent({
+            content: {
+                parts: [{ text: safeText }]
+            },
+            outputDimensionality: 768
+        });
+
         return result.embedding.values;
     } catch (err) {
         console.error("Embedding failed:", err.message);
@@ -95,8 +97,8 @@ async function embedText(text) {
 }
 
 
-
 function cosineSimilarity(a, b) {
+
     if (!a || !b || a.length !== b.length) return -1;
 
     let dot = 0;
