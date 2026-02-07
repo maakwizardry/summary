@@ -9,16 +9,25 @@ const userSchema = mongoose.Schema({
         type: String,
         required: true,
     },
-    pro : {
-        type : Boolean,
-        default : false
+    googleId: {
+        type: String,
+    },
+    authProvider: {
+        type: String,
+        enum: ["local", "google"],
+        default: "local",
+    },
+
+    pro: {
+        type: Boolean,
+        default: false
     },
     otp: {
         type: String,
     },
-    limit : {
-        type : Number,
-        default : 0,
+    limit: {
+        type: Number,
+        default: 0,
     },
     isVerified: {
         type: Boolean,

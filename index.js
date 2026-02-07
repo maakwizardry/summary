@@ -51,8 +51,8 @@ app.get('/api/memory/files', userMiddleware, async (req, res) => {
     res.status(500).json({ message: "Internal server error" });
   }
 })
+
 app.use("/api/users", UserRouter);
-app.use('/user/verify', userMiddleware);
 app.use("/api/process", BriefRouter);
 app.use("/api/contactus", ContactRouter);
 app.use("/api/payment", PaymentRouter);

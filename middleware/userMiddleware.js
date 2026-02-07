@@ -17,7 +17,7 @@ const protect = async (req, res, next) => {
     req.user = await User.findById(decoded.id).select("-password"); // attach user to req
     next();
   } catch (err) {
-    res.status(401).json({ message: "Token is invalid or expired" });
+    return res.status(401).json({ message: "Token is invalid or expired" });
   }
 };
 

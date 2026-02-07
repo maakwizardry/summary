@@ -433,10 +433,13 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   }
 
   const chunks = await Chunk.find(queryFilter);
-  if (chunks) {
+  if (chunks.length > 0) {
     const file_id = chunks[0].file_id;
     const file = await File.findById(file_id);
     filename = file.filename;
+  }
+  else {
+    return "Looks like you have'nt uploaded any files yet, upload files here to create you second brain ready for you !";
   }
 
 
@@ -468,7 +471,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   const topChunks = [];
 
-  for (const c of scoredChunks) {
+  for (const c of filteredResults) {
     if (topChunks.length < 5) {
       topChunks.push(c);
       topChunks.sort((a, b) => b.score - a.score);
@@ -477,14 +480,6 @@ const respondHandler = async (query, user, selectedFiles = []) => {
       topChunks.sort((a, b) => b.score - a.score);
     }
   }
-
-
-
-
-
-  // return console.log(topChunks)
-
-
 
 
 
@@ -497,7 +492,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   const context =
     selectedFiles.length > 0
-      ? topChunks.map(c => `context ${i + 1}:\n${c.text}`).join("\n\n")
+      ? topChunks.map((c, i) => `context ${i + 1}:\n${c.text}`).join("\n\n")
       : topChunks.map((c, i) => `Context ${i + 1}:\n${c.text}`).join("\n\n");
 
 
@@ -614,99 +609,6 @@ function batchChunks(chunks, batchSize = 5) {
 // }
 
 
-// main function 1 
-
-async function summarizeFilesByIds(fileIds, user) {
-  if (!fileIds.length) {
-    return "Please select a document using @filename.";
-  }
-
-
-  let allMiniSummaries = [];
-
-  for (const fileId of fileIds) {
-    const file = await File.findOne({
-      _id: fileId,
-      user_id: user._id
-    });
-
-    if (!file) continue;
-
-    const chunks = await Chunk.find({
-      file_id: file._id,
-      user_id: user._id
-    }).sort({ chunk_index: 1 });
-
-    if (!chunks.length) continue;
-
-    const batches = batchChunks(chunks, 5);
-
-    for (const batch of batches) {
-      const text = batch.map(c => c.text).join("\n");
-      const mini = await summarizeChunkBatch(text);
-      allMiniSummaries.push(mini);
-    }
-  }
-
-  if (!allMiniSummaries.length) {
-    return "Unable to generate summary from the selected document.";
-  }
-
-  const finalPrompt = `
-Combine the following summaries into a final clear summary.
-Do not add new information.
-
-${allMiniSummaries.join("\n\n")}
-`;
-
-  const result = await model.safeGenerate(finalPrompt);
-  return result.response.text();
-}
-
-
-async function summarizeFiles(fileNames, user) {
-  const files = await File.find({
-    user_id: user._id,
-    filename: { $in: fileNames }
-  });
-
-  if (!files.length) {
-    return "I’m unable to find the requested file in your uploaded documents.";
-  }
-
-  let combinedText = "";
-
-  for (const file of files) {
-    const chunks = await fetchFileChunks(file._id, user._id);
-
-    for (const chunk of chunks) {
-      combinedText += chunk.text + "\n\n";
-    }
-  }
-
-  // 🔥 SAFETY CHECK
-  if (!combinedText.trim()) {
-    return "No meaningful content found in the document.";
-  }
-
-  const prompt = `
-Summarize the following document clearly and accurately.
-
-Rules:
-- Do not add new information
-- Do not assume anything
-- Keep it concise but complete
-- Preserve facts, numbers, and intent
-
-Document content:
-${combinedText}
-
-Summary:
-`;
-
-  const result = await model.generateContent(prompt);
-  return result.response.text();
-}
 
 async function summarizeFilesByNames(query, fileId, user) {
 
@@ -781,7 +683,7 @@ Important Details:
 • Mention technical, architectural, or factual details if present
 • Preserve names, technologies, and processes
 • Do not invent information
-no mark downs , no emoji no other signs !! ( should not use ** , * )
+no mark downs , no emoji no other signs !! ( should not use ** , * ) dont use any marking rather than bullet points should not use * symbol or anything to highlight
 
 You can ask questions like:
 • Suggest relevant questions the user can ask based on this document
@@ -838,7 +740,7 @@ Intent:
 
 
 const respond = async (req, res) => {
-  const { query, file, selectedFiles = [] } = req.body;
+  const { query, selectedFiles = [] } = req.body;
 
 
   const user = req.user;
@@ -854,33 +756,12 @@ const respond = async (req, res) => {
   const intent = await detectIntentWithGemini(query);
   let response;
 
-  if (
-    intent === "SUMMARIZE" &&
-    selectedFiles.length === 1   // mentioned files
-  ) {
-    // Fetch selected file name
-    const selectedFile = await File.findOne({
-      _id: selectedFiles[0],
-      user_id: user._id
-    });
-
-    if (
-      selectedFile &&
-      file.fileId !== selectedFiles[0]
-    ) {
-      return res.json({
-        intent,
-        conflict: true,
-        response: `I couldn’t find the file "${selectedFile.filename}". Please confirm which file you want to summarize and try selecting it again from the available options.`
-
-      });
-    }
-
+  if (intent === "SUMMARIZE") {
     response = await summarizeFilesByNames(query, selectedFiles, user);
   }
   else {
     // QUESTION / EXPLAIN → use embeddings
-    response = await respondHandler(query, user, file);
+    response = await respondHandler(query, user);
   }
 
   return res.json({

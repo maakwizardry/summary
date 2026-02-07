@@ -3,7 +3,11 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const sendMail = require("../utils/sendMail");
 const jwt = require("jsonwebtoken");
+const { OAuth2Client } = require("google-auth-library");
 const { stat } = require("fs");
+
+
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const register = async (req, res) => {
   try {
@@ -155,7 +159,78 @@ const getUserProfile = async (req, res) => {
   });
 };
 
+const Google = async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ message: "Google token missing" });
+    }
+
+    // 1️⃣ Verify Google token
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const { email, email_verified, sub: googleId } = payload;
+
+    if (!email || !email_verified) {
+      return res.status(401).json({ message: "Google email not verified" });
+    }
+
+    // 2️⃣ Find user by EMAIL ONLY
+    let user = await User.findOne({ email });
+
+    // 3️⃣ If user exists
+    if (user) {
+      // 🚫 Email/password user trying Google
+      if (user.authProvider === "local") {
+        return res.status(409).json({
+          message: "An account already exists with this email please try to use login with password .",
+        });
+      }
+
+      // ✅ Google user logging in again
+      if (!user.googleId) {
+        user.googleId = googleId;
+        await user.save();
+      }
+    }
+
+    // 4️⃣ Create new Google user if not exists
+    if (!user) {
+      user = await User.create({
+        email,
+        password: "GOOGLE_AUTH",
+        googleId,
+        authProvider: "google",
+        isVerified: true,
+        limit: 0,
+        pro: false,
+      });
+    }
+
+    // 5️⃣ Issue app JWT
+    const appToken = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res.status(200).json({
+      token: appToken,
+      email: user.email,
+      userId: user._id,
+      status: true,
+    });
+
+  } catch (err) {
+    console.error("Google Sign-In Error:", err);
+    return res.status(401).json({ message: "Invalid Google token" });
+  }
+};
 
 
 
-module.exports = { register, login, verifyOtp, getUserProfile };
+module.exports = { register, login, verifyOtp, getUserProfile, Google };
