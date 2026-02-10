@@ -11,10 +11,10 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const register = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { username, email, password } = req.body;
 
     // 1. Validate inputs
-    if (!email || !password) {
+    if (!email || !password || !username) {
       return res.status(400).json({ message: "All fields are required" });
     }
 
@@ -33,10 +33,10 @@ const register = async (req, res) => {
 
     // 5. Create new user
     const newUser = new User({
+      username,
       email,
       password: hashedPassword,
       otp,
-      isVerified: true, // until OTP is verified
     });
 
     await newUser.save();

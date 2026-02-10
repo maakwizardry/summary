@@ -27,6 +27,11 @@ const ChunkSchema = new mongoose.Schema(
             type: String,
             required: true,
         },
+        chunk_hash: {
+            type: String,
+            index: true
+        }
+        ,
 
         // Vector embedding
         embedding: {

@@ -1,11 +1,19 @@
 const fs = require("fs");
 const { extractText, chunkText, embedText, cosineSimilarity } = require("../utils/Processing.js");
 const File = require("../models/File.js");
-const crypto = require("crypto");
 const Chunk = require("../models/Chunk.js");
 const cloudinary = require("cloudinary").v2;
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const streamifier = require("streamifier");
+const crypto = require("crypto");
+
+function hashText(text) {
+  return crypto
+    .createHash("sha256")
+    .update(text)
+    .digest("hex");
+}
+
 
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -256,7 +264,11 @@ processFiles = async (req, res) => {
 
     console.log(files);
     console.log(user);
+
+
     // 🔹 STEP 1: store files + register memory
+
+
     const storedFiles = [];
 
     for (const file of files) {
@@ -287,6 +299,7 @@ processFiles = async (req, res) => {
       const safeFilename = Buffer
         .from(file.originalname, "utf8")
         .toString("utf8");
+
 
       // 1️⃣ Create DB record FIRST
       const fileDoc = await File.create({
@@ -328,20 +341,31 @@ processFiles = async (req, res) => {
       const chunkDocs = [];
 
       for (let i = 0; i < chunkedText.length; i++) {
-        const chunk = chunkedText[i];
-        if (!chunk.trim()) continue;
+        const chunk = chunkedText[i].trim();
+        if (!chunk) continue;
+
+        const chunkHash = hashText(chunk);
+
+        const exists = await Chunk.findOne({
+          user_id: user._id,
+          chunk_hash: chunkHash
+        });
+
+        if (exists) continue; // ✅ skip duplicate
 
         const vector = await embedText(chunk);
 
         chunkDocs.push({
           user_id: user._id,
           file_id: fileDoc._id,
-          filename: safeFilename, // ✅ IMPORTANT
+          filename: safeFilename,
           chunk_index: i,
-          text: chunk.trim(),
+          text: chunk,
+          chunk_hash: chunkHash,
           embedding: vector,
         });
       }
+
 
       if (!chunkDocs.length) {
         await File.updateOne(
@@ -434,9 +458,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   const chunks = await Chunk.find(queryFilter);
   if (chunks.length > 0) {
-    const file_id = chunks[0].file_id;
-    const file = await File.findById(file_id);
-    filename = file.filename;
+
   }
   else {
     return "Looks like you have'nt uploaded any files yet, upload files here to create you second brain ready for you !";
@@ -444,15 +466,16 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
 
-  const MIN_SCORE = 0.25;
 
+  const MIN_SCORE = 0.56;
   const scoredChunks = await Promise.all(
     chunks.map(async (chunk) => {
       const score = cosineSimilarity(questionEmbedding, chunk.embedding);
 
-      if (score < MIN_SCORE) return null;
+      if (score < MIN_SCORE) return false;
 
       const file = await File.findById(chunk.file_id).select("filename");
+      console.log("filename : " + file);
 
       return {
         text: chunk.text,
@@ -462,7 +485,16 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     })
   );
 
+
+  // return console.log(scoredChunks);
+
   const filteredResults = scoredChunks.filter(Boolean);
+  console.log("fILTERED RESULTS : \N");
+
+
+  if (!filteredResults.length > 0) {
+    return "I searched your document memory, but this context doesn’t seem to exist in your saved files yet."
+  }
 
 
 
@@ -483,7 +515,6 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
 
-  console.log(scoredChunks);
 
   // if (!topChunks.length) {
   //   return "I’m unable to find relevant information about the requested topic in the uploaded documents.";
@@ -492,8 +523,10 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   const context =
     selectedFiles.length > 0
-      ? topChunks.map((c, i) => `context ${i + 1}:\n${c.text}`).join("\n\n")
-      : topChunks.map((c, i) => `Context ${i + 1}:\n${c.text}`).join("\n\n");
+      ? topChunks.map((c, i) => `filename : ${c?.filename} \n context ${i + 1}:\n${c.text}`).join("\n\n")
+      : topChunks.map((c, i) => `filename : ${c?.filename} \n Context ${i + 1}:\n${c.text}`).join("\n\n");
+
+  // return console.log(context);
 
 
 
@@ -501,44 +534,74 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   const prompt = `
 You are a professional AI assistant called BriefMe AI.
 
-Your task is to answer the user's question using ONLY the information provided in the context.
+BriefMe AI helps users recall and understand information stored in their uploaded documents.
+You should respond with confidence and continuity, as a document-based knowledge assistant,
+while remaining strictly grounded in the provided context.
 
-Interpret the user's question by meaning, not exact wording.
-If different words or phrases clearly refer to the same concept or role described in the context,
-treat them as equivalent.
-Rewrite the user query to include equivalent phrases
-that may appear in formal documents.
+Your task is to answer the user's question using ONLY the information provided in the context .
 
-Do not change intent.
-Do not add new meaning.
+INTENT & LANGUAGE INTERPRETATION RULES:
+- Interpret the user's question by meaning, not by exact wording.
+- The user may use informal language, spelling mistakes, grammar errors, or shorthand.
+- If the user's wording contains typos or incorrect grammar, infer the intended meaning.
+- If the user uses conversational phrases such as "do you remember", "do you know",
+  interpret them as asking whether information about the topic exists in the documents.
+- It is acceptable to respond with phrases like "Yes, I have information about..."
+  or "Yes, your documents describe...", if and only if the context supports it.
+- Do NOT imply personal memory, past conversations, or human experiences.
 
-Examples (do not mention these in the answer):
+
+
+
+SEMANTIC MATCHING RULES:
+- If different words or phrases clearly refer to the same concept described in the context,
+  treat them as equivalent.
+- Match informal or vague user expressions to formal terminology used in documents.
+- Rewrite the user's question internally using equivalent formal terms if needed,
+  without changing the original intent or adding new meaning.
+
+Examples of equivalence (do not mention these in the answer):
 - creator, builder, author, developer → same role if context supports it
-- app, system, project → same entity if context defines one clearly
+- app, system, project, tool → same entity if context defines one clearly
+- remember, know, aware of → existence of information in documents
 
-Rules:
+STRICT GROUNDING RULES:
 - Do NOT use external knowledge
 - Do NOT invent facts
 - Do NOT guess missing information
-- Only answer if the context reasonably supports the user's intent
+- Do NOT assume details not present in the context
+- Only answer if the context reasonably supports the user's intent by meaning
 
+FAILSAFE RESPONSE:
 If the context does NOT support the user's intent by meaning, respond EXACTLY with:
 "I’m unable to find relevant information about the requested topic in the uploaded documents."
 
-If the context partially answers the question:
-- Answer only with what is supported
-- Do not fill gaps or assume details
+PARTIAL ANSWER RULE:
+- If the context partially answers the question, respond only with the supported information
+- Do not fill gaps or infer unstated details
 
-Style rules:
+REFERENCE RULES:
+- you should start with references heading and mention the acutual filename(s) 
+- If the context includes filenames, include a natural reference at the end of the answer indicating where the information comes from.
+- Use phrasing such as: "This information is based on content from <filename>."
+- If multiple filenames are present, mention them together naturally.
+- If a filename is "Unknown file", do NOT mention it or refer to it in the answer.
+- If no valid filenames are available, do not include any reference statement.
+- References must be part of the same paragraph and written in natural language, not as citations or bullet points.
+
+STYLE RULES:
 - Clear, professional English
-- Single paragraph
+- Use clear formatting with short paragraphs separated by line breaks when it improves readability
+- Use plain paragraphs separated by line breaks.
+- Do NOT use bullet points, numbered lists, symbols, or markdown-style formatting.
 - No bullets, markdown, emojis, headings, or source mentions
 
-Accuracy rules:
-- Every fact must be grounded in the context
-- No speculation
+ACCURACY RULES:
+- Every statement must be grounded in the context
+- No speculation or overconfidence
 
 Context:
+Filename : ${context.filename}
 ${context}
 
 User question:
@@ -551,6 +614,7 @@ Answer:
 
 
 
+
   const result = await model.generateContent(prompt);
   const answer = result.response.text();
   console.log(answer);
@@ -558,42 +622,42 @@ Answer:
 }
 
 
-async function fetchFileChunks(fileId, userId) {
-  return await Chunk.find({
-    file_id: fileId,
-    user_id: userId
-  }).sort({ chunk_index: 1 }).limit(12);
-}
+// async function fetchFileChunks(fileId, userId) {
+//   return await Chunk.find({
+//     file_id: fileId,
+//     user_id: userId
+//   }).sort({ chunk_index: 1 }).limit(12);
+// }
 
 
 
 
-async function summarizeChunkBatch(text) {
-  const prompt = `
-Summarize the following content clearly and factually.
-Do not add new information.
-Do not infer or analyze.
-Preserve numbers, facts, and statements exactly as written.
+// async function summarizeChunkBatch(text) {
+//   const prompt = `
+// Summarize the following content clearly and factually.
+// Do not add new information.
+// Do not infer or analyze.
+// Preserve numbers, facts, and statements exactly as written.
 
-Content:
-${text}
+// Content:
+// ${text}
 
-Summary:
-`;
+// Summary:
+// `;
 
-  const result = await model.generateContent(prompt);
-  return result.response.text();
-}
+//   const result = await model.generateContent(prompt);
+//   return result.response.text();
+// }
 
 
 
-function batchChunks(chunks, batchSize = 5) {
-  const batches = [];
-  for (let i = 0; i < chunks.length; i += batchSize) {
-    batches.push(chunks.slice(i, i + batchSize));
-  }
-  return batches;
-}
+// function batchChunks(chunks, batchSize = 5) {
+//   const batches = [];
+//   for (let i = 0; i < chunks.length; i += batchSize) {
+//     batches.push(chunks.slice(i, i + batchSize));
+//   }
+//   return batches;
+// }
 
 
 // async function safeGenerate(prompt, retries = 3) {
@@ -625,14 +689,13 @@ async function summarizeFilesByNames(query, fileId, user) {
   // return console.log(files);
 
   if (!files.length) {
-    return "I’m unable to find the requested file in your uploaded documents.";
+    return "Can you please let me know which files you are refering for .";
   }
 
   let combinedText = "";
 
   for (const file of files) {
-    combinedText += `Document Name: ${file.filename}\n`;
-
+    combinedText += `Document Name or file name : ${file.filename}\n`;
     const chunks = await Chunk.find({
       file_id: file._id,
       user_id: user._id
@@ -649,55 +712,77 @@ async function summarizeFilesByNames(query, fileId, user) {
 
 
   if (!combinedText.trim()) {
-    return "No meaningful content found in the document.";
+    return "No meaningful content found in the document . looks like you have no data";
   }
   const prompt = `
-You are BriefMe AI, a professional document analysis assistant.
 
-You are given document content extracted from user-uploaded files.
-Each document is clearly labeled with its filename.
-if the user ask for comparisn show clearly by comparing , if the user ask for summary show clearly the summary based on user query .
+  You are a professional AI assistant called BriefMe AI.
 
-You MUST follow the output structure EXACTLY.
-Do not use markdown or special formatting.
+BriefMe AI helps users recall and understand information stored in their uploaded documents.
+You should respond with confidence and continuity, as a document-based knowledge assistant,
+while remaining strictly grounded in the provided context.
 
-ALLOWED FORMATTING:
-- Plain text
-- Paragraphs
-- Bullet points alone
-- Line breaks
+Your task is to answer the user's question using ONLY the information provided in the context .
 
-OUTPUT STRUCTURE (repeat for EACH document):
+INTENT & LANGUAGE INTERPRETATION RULES:
+- Interpret the user's question by meaning, not by exact wording.
+- The user may use informal language, spelling mistakes, grammar errors, or shorthand.
+- If the user's wording contains typos or incorrect grammar, infer the intended meaning.
+- If the user uses conversational phrases such as "do you remember", "do you know",
+  interpret them as asking whether information about the topic exists in the documents.
+- It is acceptable to respond with phrases like "Yes, I have information about..."
+  or "Yes, your documents describe...", if and only if the context supports it.
+- Do NOT imply personal memory, past conversations, or human experiences.
 
-File: <filename>
+SEMANTIC MATCHING RULES:
+- If different words or phrases clearly refer to the same concept described in the context,
+  treat them as equivalent.
+- Match informal or vague user expressions to formal terminology used in documents.
+- Rewrite the user's question internally using equivalent formal terms if needed,
+  without changing the original intent or adding new meaning.
 
-Summary:
-Write a clear paragraph summarizing the document.
+Examples of equivalence (do not mention these in the answer):
+- creator, builder, author, developer → same role if context supports it
+- app, system, project, tool → same entity if context defines one clearly
+- remember, know, aware of → existence of information in documents
 
-Key Points:
-• List the most important ideas or findings and make bold for those words which is important so that user can catch attention
-• Keep points concise and factual
-• Do not repeat sentences from the summary
+STRICT GROUNDING RULES:
+- Do NOT use external knowledge
+- Do NOT invent facts
+- Do NOT guess missing information
+- Do NOT assume details not present in the context
+- Only answer if the context reasonably supports the user's intent by meaning
 
-Important Details:
-• Mention technical, architectural, or factual details if present
-• Preserve names, technologies, and processes
-• Do not invent information
-no mark downs , no emoji no other signs !! ( should not use ** , * ) dont use any marking rather than bullet points should not use * symbol or anything to highlight
+FAILSAFE RESPONSE:
+If the context does NOT support the user's intent by meaning, respond EXACTLY with:
+"I’m unable to find relevant information about the requested topic in the uploaded documents."
 
-You can ask questions like:
-• Suggest relevant questions the user can ask based on this document
-• Questions must be answerable from the document content
-• Do not suggest generic questions
+PARTIAL ANSWER RULE:
+- If the context partially answers the question, respond only with the supported information
+- Do not fill gaps or infer unstated details
 
-RULES:
-- Do NOT use markdown (no ###, **, tables, or code blocks)
-- Do NOT use emojis or symbols other than •
-- Do NOT merge documents unless explicitly asked
-- Do NOT add assumptions or external knowledge
-- Maintain clean spacing between sections
+REFERENCE RULES:
+- you should start with references heading and mention the acutual filename(s) 
+- If the context includes filenames, include a natural reference at the end of the answer indicating where the information comes from.
+- Use phrasing such as: "This information is based on informations from <filename>."
+- If multiple filenames are present, mention them together naturally.
+- If a filename is "Unknown file", do NOT mention it or refer to it in the answer.
+- If no valid filenames are available, do not include any reference statement.
+- References must be part of the same paragraph and written in natural language, not as citations or bullet points.
 
-DOCUMENTS:
+STYLE RULES:
+- Clear, professional English
+- REFERENCES SHOULD BE MENTIONED AT THE END ONLY
+- Use clear formatting with short paragraphs separated by line breaks when it improves readability
+- Use plain paragraphs separated by line breaks.
+- Do NOT use bullet points, numbered lists, symbols, or markdown-style formatting.
+- No bullets, markdown, emojis, headings, or source mentions
+
+ACCURACY RULES:
+- Every statement must be grounded in the context
+- No speculation or overconfidence
+
+DOCUMENTS :
 ${combinedText}
 
 User request:
@@ -713,28 +798,128 @@ Answer:
 }
 
 
-
-async function detectIntentWithGemini(query) {
+async function detectRoutingIntent(query) {
   const prompt = `
 Classify the user's intent into ONE of the following labels:
 
-- SUMMARIZE
-- QUESTION
+- SUMMARY
+- FILE_CONTEXT_REQUIRED
+- NO_FILE_CONTEXT
 
 Rules:
-- If the user provides a filename and asks to summarize and If the user provides filename or user does not want to search for specific topics in the file he just want (summarization, compare , difference or related to this etc much more) for files → SUMMARIZE else QUESTION
-- Output ONLY the intent label
 
-User input:
+1. SUMMARY:
+   - User wants a full or broad summary, overview, comparison, or explanation of an entire document or documents.
+   - Examples: "summarize", "overview", "compare files", "explain the document"
+
+2. FILE_CONTEXT_REQUIRED:
+   - User asks about specific keywords, concepts, or sections
+   - AND explicitly references a file (e.g. @file.pdf)
+   - Examples: "Explain second brain @file.pdf", "What does the doc say about embeddings @doc"
+
+3. NO_FILE_CONTEXT:
+   - User does NOT reference any file
+   - OR asks a general/conceptual question
+   - OR casual conversation
+
+Important:
+- Do NOT assume file usage unless a file is explicitly mentioned
+- If no file is mentioned → NO_FILE_CONTEXT
+- Output ONLY the label
+
+User query:
 "${query}"
 
-Intent:
+Label:
 `;
 
   const result = await model.generateContent(prompt);
   return result.response.text().trim();
 }
 
+
+const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
+  if (!selectedFiles || selectedFiles.length === 0) {
+    throw new Error("No files selected but FILE_CONTEXT_REQUIRED triggered");
+  }
+
+  // 1️⃣ Get file IDs
+  const fileIds = selectedFiles;
+
+  // 2️⃣ Fetch only relevant chunks (FAST & ACCURATE)
+  const chunks = await Chunk.find({
+    user_id: user._id,
+    file_id: { $in: fileIds }
+  });
+
+  if (!chunks.length) {
+    return {
+      answer: "No relevant content found in the selected files."
+    };
+  }
+
+  // 3️⃣ Embed the user question
+  const questionEmbedding = await embedText(query);
+  if (!questionEmbedding) {
+    throw new Error("Failed to embed query");
+  }
+
+  // 4️⃣ Score chunks
+  const scoredChunks = chunks
+    .map(chunk => {
+      const score = cosineSimilarity(questionEmbedding, chunk.embedding);
+      return score >= 0.55
+        ? { text: chunk.text, score, file_id: chunk.file_id }
+        : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5); // TOP-K
+
+  if (!scoredChunks.length) {
+    return "The selected files do not mention this topic."
+  }
+
+  const topChunks = [];
+
+  for (const c of scoredChunks) {
+    if (topChunks.length < 5) {
+      topChunks.push(c);
+      topChunks.sort((a, b) => b.score - a.score);
+    } else if (c.score > topChunks[4].score) {
+      topChunks[4] = c;   // ✅ replace the WORST chunk
+      topChunks.sort((a, b) => b.score - a.score);
+    }
+  }
+
+
+  // 5️⃣ Prepare context for LLM
+  const context = topChunks
+    .map(
+      (c, i) =>
+        `Source ${i + 1}:\n${c.text}`
+    )
+    .join("\n\n");
+
+  // 6️⃣ Ask LLM (ANSWER, not summarize)
+  const prompt = `
+Answer the user's question using ONLY the information below.
+If the answer is not present, say so clearly.
+
+Context:
+${context}
+
+Question:
+${query}
+
+Answer:
+`;
+
+  const result = await model.generateContent(prompt);
+
+  return result.response.text().trim()
+  // sources: scoredChunks.map(c => c.file_id)
+};
 
 
 
@@ -744,7 +929,6 @@ const respond = async (req, res) => {
 
 
   const user = req.user;
-  console.log(selectedFiles);
   if (!query) {
     return res.status(400).json({
       status: false,
@@ -753,11 +937,14 @@ const respond = async (req, res) => {
   }
 
   // 🔥 STEP 0: detect intent FIRST
-  const intent = await detectIntentWithGemini(query);
+  const intent = await detectRoutingIntent(query);
   let response;
 
-  if (intent === "SUMMARIZE") {
+  if (intent === "SUMMARY") {
     response = await summarizeFilesByNames(query, selectedFiles, user);
+  }
+  else if (intent == "FILE_CONTEXT_REQUIRED") {
+    response = await FILE_CONTEXT_REQUIRED(query, selectedFiles, user);
   }
   else {
     // QUESTION / EXPLAIN → use embeddings

@@ -23,7 +23,6 @@ function generateOTP(length = 6) {
 }
 
 const sendMail = async ({ to, subject, otp, name = "User" }) => {
-  return true;
   const quote = "“Do not wait to strike till the iron is hot, but make it hot by striking.” — W.B. Yeats";
 
   const html = `
