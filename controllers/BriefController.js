@@ -251,10 +251,10 @@ Begin your professional analysis now:`;
 
 processFiles = async (req, res) => {
   try {
-    const files = req.files; // array from multer
-    const user = req.user;   // from JWT middleware
-    const query = req.body.message;
-    let result = "";
+    const files = req.files;
+    const user = req.user;
+    const MIN_REQUIRED_CHUNKS = 2;
+
     if (!files || files.length === 0) {
       return res.status(400).json({
         status: false,
@@ -262,142 +262,124 @@ processFiles = async (req, res) => {
       });
     }
 
-    console.log(files);
-    console.log(user);
-
-
-    // 🔹 STEP 1: store files + register memory
-
-
     const storedFiles = [];
 
     for (const file of files) {
-      const fileId = crypto.randomUUID();
-      const filePath = `uploads/${fileId}-${file.originalname}`;
       let cloudResult;
 
       try {
+        // 1️⃣ Upload to Cloudinary
         cloudResult = await uploadToCloudinary(
           file.buffer,
           file.originalname
         );
+
+        // 2️⃣ Create file record (temporary)
+        const fileDoc = await File.create({
+          user_id: user._id,
+          filename: file.originalname,
+          cloudinary_url: cloudResult.secure_url,
+          cloudinary_id: cloudResult.public_id,
+          status: "processing",
+          mimetype: file.mimetype,
+          size: file.size,
+          total_chunks: 0
+        });
+
+        // 3️⃣ Extract text
+        const extractedText = await extractText(file);
+
+        if (!extractedText || !extractedText.trim()) {
+          await cloudinary.uploader.destroy(cloudResult.public_id);
+          await File.deleteOne({ _id: fileDoc._id });
+
+          storedFiles.push({
+            filename: file.originalname,
+            status: "failed",
+            reason: "No readable text found"
+          });
+          continue;
+        }
+
+        // 4️⃣ Chunk text
+        const chunks = chunkText(extractedText).filter(c => c.trim());
+        const chunkDocs = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          const hash = hashText(chunk);
+
+          const exists = await Chunk.findOne({
+            user_id: user._id,
+            chunk_hash: hash
+          });
+
+          if (exists) continue;
+
+          const embedding = await embedText(chunk);
+
+          chunkDocs.push({
+            user_id: user._id,
+            file_id: fileDoc._id,
+            filename: file.originalname,
+            chunk_index: i,
+            text: chunk,
+            chunk_hash: hash,
+            embedding
+          });
+        }
+
+        // ❌ STRICT VALIDATION
+        if (chunkDocs.length < MIN_REQUIRED_CHUNKS) {
+          await cloudinary.uploader.destroy(cloudResult.public_id);
+          await File.deleteOne({ _id: fileDoc._id });
+
+          storedFiles.push({
+            filename: file.originalname,
+            status: "failed",
+            reason: "Insufficient content"
+          });
+          continue;
+        }
+
+        // ✅ Store chunks
+        await Chunk.insertMany(chunkDocs);
+
+        // ✅ Update file as indexed
+        await File.updateOne(
+          { _id: fileDoc._id },
+          {
+            status: "indexed",
+            total_chunks: chunkDocs.length
+          }
+        );
+
+        storedFiles.push({
+          file_id: fileDoc._id,
+          filename: file.originalname,
+          total_chunks: chunkDocs.length,
+          status: "indexed"
+        });
+
       } catch (err) {
-        console.error("Cloudinary upload failed:", err);
+        console.error("File processing failed:", err);
+
+        if (cloudResult?.public_id) {
+          await cloudinary.uploader.destroy(cloudResult.public_id);
+        }
 
         storedFiles.push({
           filename: file.originalname,
           status: "failed",
-          reason: "Cloud upload failed"
-        });
-
-        continue; // ⬅️ IMPORTANT: skip this file
-      }
-
-
-      console.log(cloudResult);
-
-      const safeFilename = Buffer
-        .from(file.originalname, "utf8")
-        .toString("utf8");
-
-
-      // 1️⃣ Create DB record FIRST
-      const fileDoc = await File.create({
-        user_id: user._id,
-        filename: safeFilename,
-        cloudinary_url: cloudResult.secure_url,
-        cloudinary_id: cloudResult.public_id,
-        status: "processing",
-        mimetype: file.mimetype,
-        size: file.size,
-        total_chunks: 0,
-      });
-
-      // 2️⃣ Extract text
-      const extractedText = await extractText(file);
-
-      if (!extractedText || !extractedText.trim()) {
-        await File.updateOne(
-          { _id: fileDoc._id },
-          { status: "failed" }
-        );
-
-        storedFiles.push({
-          file_id: fileDoc._id,
-          filename: safeFilename,
-          status: "failed",
-          reason: "Empty or unsupported content"
-        });
-
-        continue;
-      }
-
-      // 3️⃣ Chunk safely
-      let chunkedText = chunkText(extractedText);
-      if (!chunkedText.length) {
-        chunkedText = [extractedText.trim()];
-      }
-
-      const chunkDocs = [];
-
-      for (let i = 0; i < chunkedText.length; i++) {
-        const chunk = chunkedText[i].trim();
-        if (!chunk) continue;
-
-        const chunkHash = hashText(chunk);
-
-        const exists = await Chunk.findOne({
-          user_id: user._id,
-          chunk_hash: chunkHash
-        });
-
-        if (exists) continue; // ✅ skip duplicate
-
-        const vector = await embedText(chunk);
-
-        chunkDocs.push({
-          user_id: user._id,
-          file_id: fileDoc._id,
-          filename: safeFilename,
-          chunk_index: i,
-          text: chunk,
-          chunk_hash: chunkHash,
-          embedding: vector,
+          reason: "Processing error"
         });
       }
-
-
-      if (!chunkDocs.length) {
-        await File.updateOne(
-          { _id: fileDoc._id },
-          { status: "failed" }
-        );
-        continue;
-      }
-
-      await Chunk.insertMany(chunkDocs);
-
-      await File.updateOne(
-        { _id: fileDoc._id },
-        {
-          status: "indexed",
-          total_chunks: chunkDocs.length
-        }
-      );
-
-      storedFiles.push({
-        file_id: fileDoc._id,
-        filename: safeFilename,
-        total_chunks: chunkDocs.length,
-        status: "indexed",
-      });
     }
 
-    // 🔹 STEP 2: respond immediately
     return res.status(200).json({
       status: true,
-      message: "Files uploaded successfully",
-      files: storedFiles,
+      message: "File processing completed",
+      files: storedFiles
     });
 
   } catch (error) {
@@ -409,21 +391,6 @@ processFiles = async (req, res) => {
   }
 };
 
-
-function normalizeQuery(q) {
-  return q.toLowerCase().trim();
-}
-
-function normalize(vec) {
-  const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-  return norm === 0 ? vec : vec.map(v => v / norm);
-}
-
-
-function extractFileRefs(query) {
-  const regex = /@([\w\-_.]+?\.(pdf|docx|txt))/gi;
-  return [...query.matchAll(regex)].map(m => m[1]);
-}
 
 
 
@@ -513,6 +480,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     }
   }
 
+  console.log(topChunks);
 
 
 
@@ -530,7 +498,6 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
 
-
   const prompt = `
 You are a professional AI assistant called BriefMe AI.
 
@@ -538,39 +505,43 @@ BriefMe AI helps users recall and understand information stored in their uploade
 You should respond with confidence and continuity, as a document-based knowledge assistant,
 while remaining strictly grounded in the provided context.
 
-Your task is to answer the user's question using ONLY the information provided in the context .
+Your task is to answer the user's question using ONLY the information provided in the context.
 
 INTENT & LANGUAGE INTERPRETATION RULES:
 - Interpret the user's question by meaning, not by exact wording.
 - The user may use informal language, spelling mistakes, grammar errors, or shorthand.
-- If the user's wording contains typos or incorrect grammar, infer the intended meaning.
-- If the user uses conversational phrases such as "do you remember", "do you know",
-  interpret them as asking whether information about the topic exists in the documents.
-- It is acceptable to respond with phrases like "Yes, I have information about..."
-  or "Yes, your documents describe...", if and only if the context supports it.
+- Infer the intended meaning when the question is clear by context.
+- If the user asks about a person and an identifying number appears directly alongside the person’s name,
+  treat the number as an identifier such as a register number, roll number, or enrollment number,
+  if this interpretation is reasonable and consistent with academic or document conventions.
 - Do NOT imply personal memory, past conversations, or human experiences.
 
-
+SEMANTIC PARAPHRASE UNDERSTANDING RULE:
+- Treat differently worded sentences with the same meaning as equivalent.
+- Examples of equivalent meaning include:
+  good, beneficial, helpful, healthy, recommended → positive evaluation
+  bad, harmful, unhealthy, not recommended → negative evaluation
+- Treat reordered phrases as equivalent:
+  eating in the morning ↔ morning eating
+  food eaten in the morning ↔ breakfast
+- If the context clearly expresses a judgment or statement,
+  answer the user even if the wording differs, as long as the meaning is the same.
+- This is considered semantic understanding, not inference or guessing.
 
 
 SEMANTIC MATCHING RULES:
-- If different words or phrases clearly refer to the same concept described in the context,
-  treat them as equivalent.
-- Match informal or vague user expressions to formal terminology used in documents.
-- Rewrite the user's question internally using equivalent formal terms if needed,
-  without changing the original intent or adding new meaning.
-
-Examples of equivalence (do not mention these in the answer):
-- creator, builder, author, developer → same role if context supports it
-- app, system, project, tool → same entity if context defines one clearly
-- remember, know, aware of → existence of information in documents
+- Treat equivalent academic terms as the same concept when context supports it.
+- Examples include:
+  register number, roll number, enrollment number, student ID → same concept
+- If a student name is immediately followed by an alphanumeric code,
+  interpret it as the student’s register number unless contradicted by context.
 
 STRICT GROUNDING RULES:
 - Do NOT use external knowledge
 - Do NOT invent facts
 - Do NOT guess missing information
-- Do NOT assume details not present in the context
-- Only answer if the context reasonably supports the user's intent by meaning
+- Logical interpretation of explicitly written text is allowed
+- Do NOT introduce information not present in the context
 
 FAILSAFE RESPONSE:
 If the context does NOT support the user's intent by meaning, respond EXACTLY with:
@@ -578,39 +549,32 @@ If the context does NOT support the user's intent by meaning, respond EXACTLY wi
 
 PARTIAL ANSWER RULE:
 - If the context partially answers the question, respond only with the supported information
-- Do not fill gaps or infer unstated details
+- Do not fill gaps or infer unstated details beyond logical document conventions
 
 REFERENCE RULES:
-- you should start with references heading and mention the acutual filename(s) 
-- If the context includes filenames, include a natural reference at the end of the answer indicating where the information comes from.
-- Use phrasing such as: "This information is based on content from <filename>."
-- If multiple filenames are present, mention them together naturally.
-- If a filename is "Unknown file", do NOT mention it or refer to it in the answer.
-- If no valid filenames are available, do not include any reference statement.
-- References must be part of the same paragraph and written in natural language, not as citations or bullet points.
+- End the answer by naturally mentioning the source filename if available
+- Use phrasing such as:
+  "This information is based on content from <filename>."
+- If no valid filename is available, do not mention references
 
 STYLE RULES:
 - Clear, professional English
-- Use clear formatting with short paragraphs separated by line breaks when it improves readability
-- Use plain paragraphs separated by line breaks.
-- Do NOT use bullet points, numbered lists, symbols, or markdown-style formatting.
-- No bullets, markdown, emojis, headings, or source mentions
+- Plain paragraphs separated by line breaks
+- No bullet points, symbols, markdown, or headings
 
 ACCURACY RULES:
 - Every statement must be grounded in the context
 - No speculation or overconfidence
 
 Context:
-Filename : ${context.filename}
+Filename: ${context.filename}
 ${context}
 
 User question:
 ${query}
 
 Answer:
-`;
-
-
+`
 
 
 

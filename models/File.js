@@ -51,6 +51,10 @@ const FileSchema = new mongoose.Schema(
             type: Number,
             default: 0
         },
+        reason: {
+            type: String,
+            default: null
+        }
     },
     {
         timestamps: true // createdAt, updatedAt

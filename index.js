@@ -61,7 +61,7 @@ app.use("/api/payment", PaymentRouter);
 
 // Root route
 app.get("/", async (req, res) => {
-  res.send("API is running...");
+  // console.log("hi"); // MUST be 768
 });
 
 
