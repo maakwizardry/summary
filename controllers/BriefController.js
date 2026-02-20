@@ -1,12 +1,11 @@
 const fs = require("fs");
-const { extractText, chunkText, embedText, cosineSimilarity } = require("../utils/Processing.js");
+const { extractText, chunkText, cosineSimilarity } = require("../utils/Processing.js");
 const File = require("../models/File.js");
 const Chunk = require("../models/Chunk.js");
 const cloudinary = require("cloudinary").v2;
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const streamifier = require("streamifier");
 const crypto = require("crypto");
-
+const llmService = require("../provider/llmProvider.js");
 function hashText(text) {
   return crypto
     .createHash("sha256")
@@ -16,22 +15,12 @@ function hashText(text) {
 
 
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-const model = genAI.getGenerativeModel({
-  model: "gemini-2.5-flash",
-  generationConfig: {
-    temperature: 0.4,
-    topP: 0.95,
-    topK: 40,
-    maxOutputTokens: 2200,
-  }
-});
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
+  timeout: 120000
 });
 
 
@@ -68,186 +57,6 @@ function uploadToCloudinary(buffer, filename) {
 
 
 
-async function handleFiles(file, mimeType, length) {
-
-  const fileCategory = getFileCategory(mimeType);
-
-  const systemPrompt = `You are an ENTERPRISE-LEVEL AI summarization specialist designed for professional business environments. Your summaries are used by executives, analysts, and decision-makers who require high-quality, actionable insights.
-
-🎯 YOUR MISSION: Transform content from various media formats into executive-level summaries that deliver maximum value in minimum time.
-
-📋 SUPPORTED INPUT FORMATS:
-• Images: PNG, JPG, JPEG, GIF, WebP (extract text via OCR, analyze charts/diagrams)
-• Videos: MP4, AVI, MOV, WebM (analyze frames, extract spoken content)
-• Audio: MP3, WAV, AAC, OGG (transcribe and summarize spoken content)
-• Documents: PDF, DOC, DOCX, TXT (extract and synthesize written content)
-
-✨ ENTERPRISE QUALITY STANDARDS:
-
-1. STRUCTURE & CLARITY
-   • Start IMMEDIATELY with content—no preambles like "Here is..." or "Of course"
-   • Use visual hierarchy with emojis and icons (🔹 for sections, • for bullets, → for flows)
-   • NO markdown syntax (###, **, ---). Use plain text with emojis for visual appeal
-   • Proper spacing: double line breaks between sections, single between bullets
-   • Target length: approximately ${length} words (±10% acceptable for quality)
-
-2. CONTENT DEPTH (Enterprise-Level)
-   • Extract KEY INSIGHTS, not just surface information
-   • Identify ACTIONABLE items and recommendations
-   • Highlight CRITICAL data points, statistics, and findings
-   • Capture MAIN THEMES and underlying patterns
-   • Note any IMPORTANT DATES, NAMES, or REFERENCES
-
-3. PROFESSIONAL PRESENTATION
-   • Use professional business language
-   • Organize information logically (most important first)
-   • Include context where necessary
-   • Maintain objectivity and factual accuracy
-   • Preserve technical terms and industry jargon appropriately
-
-4. MEDIA-SPECIFIC PROCESSING:
-   • IMAGES: Extract all visible text, analyze charts/graphs, describe key visual elements
-   • VIDEOS: Combine frame analysis + audio transcription, capture demonstrations/presentations
-   • AUDIO: Transcribe speech accurately, identify speakers if multiple, capture tone/emotion
-   • DOCUMENTS: Synthesize main arguments, extract conclusions, note methodology
-
-5. QUALITY CONTROLS
-   • If content is empty, unclear, or nonsensical: return "⚠️ Unable to generate summary: No meaningful content detected"
-   • If content is in another language: Summarize in the SAME language
-   • For poor quality media: Work with available information, note limitations
-   • Maintain information hierarchy: Critical → Important → Supporting details
-
-6. OUTPUT FORMAT EXAMPLE:
-🎯 Executive Summary
-[2-3 sentence overview of the entire content]
-
-🔹 Key Findings
-• Major point one → implication or action item
-• Major point two → implication or action item
-• Major point three → implication or action item
-
-🔹 Critical Details
-• Specific data, dates, or technical information
-• Supporting evidence or methodology
-• Relevant context or background
-
-📊 Insights & Recommendations
-• Strategic takeaway or lesson learned
-• Suggested next steps or considerations
-
-⚠️ NEVER mention: AI, OCR, transcription, analysis methods, or tool names in your output.
-
-Begin your enterprise-level summary now:`;
-
-  const chat = model.startChat({
-    history: [
-      {
-        role: "user",
-        parts: [{ text: systemPrompt }],
-      },
-    ],
-  });
-
-  const result = await chat.sendMessage([
-    {
-      inlineData: {
-        mimeType: mimeType,
-        data: file.toString("base64"),
-      }
-    }
-  ]);
-
-  return result;
-}
-
-
-
-async function handleText(textInput) {
-
-
-
-  const systemPrompt = `You are an ELITE TEXT ANALYSIS AI designed for enterprise environments. You transform raw text into executive-level summaries that professionals rely on for critical decision-making.
-
-🎯 YOUR ROLE: Analyze and synthesize text content into high-quality, actionable summaries for business professionals, researchers, and executives.
-
-✨ ENTERPRISE QUALITY STANDARDS:
-
-1. IMMEDIATE IMPACT
-   • Start DIRECTLY with insights—no introductions ("Here is...", "Of course...", "Sure...")
-   • Lead with the most critical information
-   • Use professional business language
-   • Maintain objective, factual tone
-
-2. STRUCTURE & PRESENTATION
-   • Visual hierarchy: 🔹 for major sections, • for bullets, → for processes/flows
-   • NO markdown (###, **, ---). Use emojis + plain text for visual structure
-   • Logical organization: Overview → Key Points → Details → Conclusions
-   • Professional spacing: double line breaks between sections
-
-3. CONTENT ANALYSIS DEPTH
-   • Extract MAIN THEMES and central arguments
-   • Identify KEY FINDINGS and critical data points
-   • Highlight ACTIONABLE INSIGHTS and recommendations
-   • Note IMPORTANT ENTITIES (names, dates, locations, organizations)
-   • Capture SUPPORTING EVIDENCE and methodology
-   • Recognize IMPLICATIONS and potential impacts
-
-4. INTELLIGENCE LEVELS
-   • For Articles/News: Who, What, When, Where, Why, Impact
-   • For Research: Hypothesis, Methodology, Findings, Conclusions, Limitations
-   • For Business Docs: Objectives, Strategies, Metrics, Recommendations, Next Steps
-   • For Technical Content: Core concepts, Implementation, Benefits, Trade-offs
-   • For Reports: Executive Summary, Key Metrics, Trends, Recommendations
-
-5. LANGUAGE HANDLING
-   • Detect input language automatically
-   • Summarize in the SAME language as input
-   • Preserve technical terminology accurately
-   • Maintain appropriate formality level
-
-6. QUALITY ASSURANCE
-   • Verify factual accuracy from source text
-   • Avoid speculation or assumptions
-   • If text is unclear/nonsensical: return "⚠️ Unable to generate summary: Content quality insufficient"
-   • If text is too short: return concise essence without padding
-   • Aim for comprehensive yet concise delivery
-
-7. OUTPUT FORMAT STRUCTURE:
-🎯 Core Message
-[1-2 sentences capturing the essence]
-
-🔹 Key Points
-• Critical finding or argument one
-• Critical finding or argument two
-• Critical finding or argument three
-
-🔹 Important Details
-• Supporting information, data, or evidence
-• Relevant context or background
-• Technical specifications or methodology
-
-💡 Takeaways
-• Strategic insight or lesson learned
-• Recommended actions or considerations
-
-⚠️ NEVER reference: AI, summarization tools, analysis methods, or processing techniques.
-
-Begin your professional analysis now:`;
-
-  const chat = model.startChat({
-    history: [
-      {
-        role: "user",
-        parts: [{ text: systemPrompt }],
-      },
-    ],
-  });
-
-  const result = await chat.sendMessage([{ text: textInput }]);
-  return result;
-}
-
-
 
 processFiles = async (req, res) => {
   try {
@@ -269,17 +78,17 @@ processFiles = async (req, res) => {
 
       try {
         // 1️⃣ Upload to Cloudinary
-        cloudResult = await uploadToCloudinary(
-          file.buffer,
-          file.originalname
-        );
+        // cloudResult = await uploadToCloudinary(
+        //   file.buffer,
+        //   file.originalname
+        // );
 
         // 2️⃣ Create file record (temporary)
         const fileDoc = await File.create({
           user_id: user._id,
           filename: file.originalname,
-          cloudinary_url: cloudResult.secure_url,
-          cloudinary_id: cloudResult.public_id,
+          // cloudinary_url: cloudResult.secure_url,
+          // cloudinary_id: cloudResult.public_id,
           status: "processing",
           mimetype: file.mimetype,
           size: file.size,
@@ -290,7 +99,7 @@ processFiles = async (req, res) => {
         const extractedText = await extractText(file);
 
         if (!extractedText || !extractedText.trim()) {
-          await cloudinary.uploader.destroy(cloudResult.public_id);
+          // await cloudinary.uploader.destroy(cloudResult.public_id);
           await File.deleteOne({ _id: fileDoc._id });
 
           storedFiles.push({
@@ -316,7 +125,11 @@ processFiles = async (req, res) => {
 
           if (exists) continue;
 
-          const embedding = await embedText(chunk);
+          const embedding = await llmService.generateEmbedding(chunk);
+          if (!embedding || !embedding.length) {
+            console.error("Embedding failed for chunk:", i);
+            continue; // skip this chunk safely
+          }
 
           chunkDocs.push({
             user_id: user._id,
@@ -325,19 +138,21 @@ processFiles = async (req, res) => {
             chunk_index: i,
             text: chunk,
             chunk_hash: hash,
-            embedding
+            embedding,
+            embedding_provider: process.env.LLM_PROVIDER,
+            embedding_dimension: embedding.length
           });
         }
 
         // ❌ STRICT VALIDATION
         if (chunkDocs.length < MIN_REQUIRED_CHUNKS) {
-          await cloudinary.uploader.destroy(cloudResult.public_id);
+          // await cloudinary.uploader.destroy(cloudResult.public_id);
           await File.deleteOne({ _id: fileDoc._id });
 
           storedFiles.push({
             filename: file.originalname,
             status: "failed",
-            reason: "Insufficient content"
+            reason: "Unable to extract the text from the file, please try with some other file\n"
           });
           continue;
         }
@@ -364,9 +179,9 @@ processFiles = async (req, res) => {
       } catch (err) {
         console.error("File processing failed:", err);
 
-        if (cloudResult?.public_id) {
-          await cloudinary.uploader.destroy(cloudResult.public_id);
-        }
+        // if (cloudResult?.public_id) {
+        //   await cloudinary.uploader.destroy(cloudResult.public_id);
+        // }
 
         storedFiles.push({
           filename: file.originalname,
@@ -407,9 +222,10 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
 
-  const questionEmbedding = await embedText(query);     // step 1 : embed the query
+  const questionEmbedding = await llmService.generateEmbedding(query);     // step 1 : embed the query   i tested here for llmService embeddings are working
 
 
+  // return console.log(questionEmbedding);
   // step 2 : fetch chunks 
 
   const queryFilter = {
@@ -437,9 +253,16 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   const MIN_SCORE = 0.56;
   const scoredChunks = await Promise.all(
     chunks.map(async (chunk) => {
+      if (
+        !chunk.embedding ||
+        chunk.embedding_provider !== process.env.LLM_PROVIDER ||
+        chunk.embedding_dimension !== questionEmbedding.length
+      ) {
+        return false;
+      }
       const score = cosineSimilarity(questionEmbedding, chunk.embedding);
 
-      if (score < MIN_SCORE) return false;
+      if (score === null || score < MIN_SCORE) return false;
 
       const file = await File.findById(chunk.file_id).select("filename");
       console.log("filename : " + file);
@@ -452,12 +275,12 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     })
   );
 
+  console.log(scoredChunks);
+
 
   // return console.log(scoredChunks);
 
   const filteredResults = scoredChunks.filter(Boolean);
-  console.log("fILTERED RESULTS : \N");
-
 
   if (!filteredResults.length > 0) {
     return "I searched your document memory, but this context doesn’t seem to exist in your saved files yet."
@@ -554,7 +377,7 @@ PARTIAL ANSWER RULE:
 REFERENCE RULES:
 - End the answer by naturally mentioning the source filename if available
 - Use phrasing such as:
-  "This information is based on content from <filename>."
+  "This summary has been prepared using information extracted from <filename>."
 - If no valid filename is available, do not mention references
 
 STYLE RULES:
@@ -577,12 +400,9 @@ Answer:
 `
 
 
-
-
-  const result = await model.generateContent(prompt);
-  const answer = result.response.text();
-  console.log(answer);
+  const answer = await llmService.generateText(prompt);
   return answer;
+
 }
 
 
@@ -639,10 +459,6 @@ Answer:
 
 
 async function summarizeFilesByNames(query, fileId, user) {
-
-
-
-
 
   console.log(user);
   // return console.log(fileNames);
@@ -728,7 +544,7 @@ PARTIAL ANSWER RULE:
 REFERENCE RULES:
 - you should start with references heading and mention the acutual filename(s) 
 - If the context includes filenames, include a natural reference at the end of the answer indicating where the information comes from.
-- Use phrasing such as: "This information is based on informations from <filename>."
+- Use phrasing such as: "This summary has been prepared using information extracted from the file <filename>."
 - If multiple filenames are present, mention them together naturally.
 - If a filename is "Unknown file", do NOT mention it or refer to it in the answer.
 - If no valid filenames are available, do not include any reference statement.
@@ -755,10 +571,9 @@ User request:
 Answer:
 `;
 
+  return await llmService.generateText(prompt);
 
 
-  const result = await model.generateContent(prompt);
-  return result.response.text();
 }
 
 
@@ -786,6 +601,45 @@ Rules:
    - OR asks a general/conceptual question
    - OR casual conversation
 
+
+If the user message contains only a greeting or simple conversational phrase (such as “hi”, “hello”, “good morning”, “how are you”, “thanks”, “bye”, etc.), and does not include any request, task, document reference, or informational question, then:
+
+Do not search any documents.
+
+Do not perform any file-based processing.
+
+Do not generate summaries or explanations.
+
+Respond naturally and appropriately to the greeting.
+
+Keep the response short, polite, and conversational.
+
+Match the tone of the user’s message.
+
+Give only the direct response.
+
+Do not return any intent classification.
+
+Do not mention system logic.
+
+Only return the conversational reply.
+
+Examples:
+
+User: "hi"
+Response: "Hi! iam your brief me AI assistant, How can I help you today?"
+
+User: "good morning"
+Response: "Good morning! What would you like to work on today?"
+
+User: "how are you?"
+Response: "I’m doing great, thanks for asking! How can I assist you?"
+
+User: "thanks"
+Response: "You're welcome! Let me know if you need anything else."
+
+Only return the response message. No intent label is required.
+
 Important:
 - Do NOT assume file usage unless a file is explicitly mentioned
 - If no file is mentioned → NO_FILE_CONTEXT
@@ -796,9 +650,9 @@ User query:
 
 Label:
 `;
+  const result = await llmService.generateText(prompt);
+  return result.trim();
 
-  const result = await model.generateContent(prompt);
-  return result.response.text().trim();
 }
 
 
@@ -823,7 +677,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
   }
 
   // 3️⃣ Embed the user question
-  const questionEmbedding = await embedText(query);
+  const questionEmbedding = await llmService.generateEmbedding(query);
   if (!questionEmbedding) {
     throw new Error("Failed to embed query");
   }
@@ -857,6 +711,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
   }
 
 
+
   // 5️⃣ Prepare context for LLM
   const context = topChunks
     .map(
@@ -879,9 +734,9 @@ ${query}
 Answer:
 `;
 
-  const result = await model.generateContent(prompt);
+  const result = await llmService.generateText(prompt);
 
-  return result.response.text().trim()
+  return result.trim()
   // sources: scoredChunks.map(c => c.file_id)
 };
 
@@ -902,6 +757,7 @@ const respond = async (req, res) => {
 
   // 🔥 STEP 0: detect intent FIRST
   const intent = await detectRoutingIntent(query);
+  // return console.log(intent);
   let response;
 
   if (intent === "SUMMARY") {
@@ -910,9 +766,14 @@ const respond = async (req, res) => {
   else if (intent == "FILE_CONTEXT_REQUIRED") {
     response = await FILE_CONTEXT_REQUIRED(query, selectedFiles, user);
   }
-  else {
+  else if (intent == "NO_FILE_CONTEXT") {
     // QUESTION / EXPLAIN → use embeddings
     response = await respondHandler(query, user);
+  }
+  else {
+    return res.json({
+      response: intent
+    });
   }
 
   return res.json({
@@ -935,7 +796,7 @@ const deleteFiles = async (req, res) => {
       });
     }
 
-    // 1️⃣ Find file (and verify ownership)
+    // 1️⃣ Find file (verify ownership)
     const file = await File.findOne({
       _id: fileId,
       user_id: user._id,
@@ -948,10 +809,16 @@ const deleteFiles = async (req, res) => {
       });
     }
 
-    // 2️⃣ Delete physical file (if exists)
-    if (file.path && fs.existsSync(file.path)) {
-      fs.unlinkSync(file.path);
-    }
+    // // 2️⃣ Delete from Cloudinary
+    // if (file.cloudinary_id) {
+    //   try {
+    //     await cloudinary.uploader.destroy(file.cloudinary_id, {
+    //       resource_type: "raw"  // IMPORTANT for PDFs
+    //     });
+    //   } catch (cloudErr) {
+    //     console.error("Cloudinary delete failed:", cloudErr);
+    //   }
+    // }
 
     // 3️⃣ Delete all related chunks
     await Chunk.deleteMany({ file_id: file._id });
@@ -971,7 +838,8 @@ const deleteFiles = async (req, res) => {
       error: "Failed to delete file",
     });
   }
-}
+};
+
 
 const renameFile = async (req, res) => {
   try {

@@ -32,6 +32,15 @@ const ChunkSchema = new mongoose.Schema(
             index: true
         }
         ,
+        embedding_provider: {
+            type: String,
+            required: true
+        },
+
+        embedding_dimension: {
+            type: Number,
+            required: true
+        },
 
         // Vector embedding
         embedding: {

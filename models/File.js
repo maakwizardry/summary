@@ -18,16 +18,16 @@ const FileSchema = new mongoose.Schema(
             index: true
         },
 
-        cloudinary_url: {
-            type: String,
-            required: true,
-        },
+        // cloudinary_url: {
+        //     type: String,
+        //     required: true,
+        // },
 
-        cloudinary_id: {
-            type: String,
-            required: true,
-            index: true, // useful for delete operations
-        },
+        // cloudinary_id: {
+        //     type: String,
+        //     required: true,
+        //     index: true, // useful for delete operations
+        // },
         status: {
             type: String,
             default: "uploaded"
