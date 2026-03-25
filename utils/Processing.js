@@ -35,38 +35,40 @@ async function extractText(file) {
 
 // ---------------- CHUNKING ----------------
 
-function chunkText(text, maxChars = 1200, overlap = 200) {
+function chunkText(text, maxChars = 1200, overlapSentences = 2) {
     if (!text || !text.trim()) return [];
 
     const clean = text
         .replace(/\r/g, "")
-        .replace(/\n{2,}/g, "\n")
-        .replace(/\s+/g, " ")
+        .replace(/[ \t]+/g, " ")
         .trim();
 
-    // 🔥 If the document is small, keep it as ONE chunk
-    if (clean.length <= maxChars) {
-        return [clean];
-    }
+    const sentences = clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
 
     const chunks = [];
-    let start = 0;
+    let currentChunk = [];
 
-    while (start < clean.length) {
-        const end = start + maxChars;
-        const chunk = clean.slice(start, end).trim();
+    for (let i = 0; i < sentences.length; i++) {
+        const sentence = sentences[i];
+        const combined = [...currentChunk, sentence].join(" ");
 
-        // Allow small chunks ONLY if it's the last one
-        if (chunk.length > 50 || end >= clean.length) {
-            chunks.push(chunk);
+        if (combined.length <= maxChars) {
+            currentChunk.push(sentence);
+        } else {
+            chunks.push(currentChunk.join(" ").trim());
+
+            // 🔥 overlap by last N sentences
+            currentChunk = currentChunk.slice(-overlapSentences);
+            currentChunk.push(sentence);
         }
+    }
 
-        start += maxChars - overlap;
+    if (currentChunk.length > 0) {
+        chunks.push(currentChunk.join(" ").trim());
     }
 
     return chunks;
 }
-
 
 async function embedText(text) {
     if (!text || !text.trim()) return null;

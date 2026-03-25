@@ -6,12 +6,34 @@ const cloudinary = require("cloudinary").v2;
 const streamifier = require("streamifier");
 const crypto = require("crypto");
 const llmService = require("../provider/llmProvider.js");
+const User = require("../models/User.js");
 function hashText(text) {
   return crypto
     .createHash("sha256")
     .update(text)
     .digest("hex");
 }
+
+
+const checkAndResetDailyUsage = async (user) => {
+  console.log("initiated");
+  const now = new Date();
+  const last = new Date(user.dailyUsage.lastReset);
+
+  const userObj = await User.findById(user._id);
+  const isSameDay =
+    now.getDate() === last.getDate() &&
+    now.getMonth() === last.getMonth() &&
+    now.getFullYear() === last.getFullYear();
+
+  if (!isSameDay) {
+    userObj.dailyUsage.chatCount = 0;
+    userObj.dailyUsage.uploadCount = 0;
+    userObj.dailyUsage.lastReset = now;
+
+    await user.save();
+  }
+};
 
 
 
@@ -62,6 +84,8 @@ processFiles = async (req, res) => {
   try {
     const files = req.files;
     const user = req.user;
+    const user_file_length = await File.find({ user_id: user._id })
+    // return console.log(user_file_length);
     const MIN_REQUIRED_CHUNKS = 2;
 
     if (!files || files.length === 0) {
@@ -74,6 +98,14 @@ processFiles = async (req, res) => {
     const storedFiles = [];
 
     for (const file of files) {
+      await checkAndResetDailyUsage(user);
+
+      if (!user.pro && user_file_length.length >= 5) {
+        return res.status(403).json({
+          message: "You’ve reached the 5-file storage limit. Upgrade to Pro to enjoy expanded memory space.",
+          type: "upgrade"
+        });
+      }
       let cloudResult;
 
       try {
@@ -95,6 +127,15 @@ processFiles = async (req, res) => {
           total_chunks: 0
         });
 
+        const user_file_limit = await User.findById(user._id);
+        if (user_file_limit) {
+          user_file_limit.dailyUsage.uploadCount += 1;
+          await user_file_limit.save();
+          console.log("User limit updated");
+        }
+
+
+
         // 3️⃣ Extract text
         const extractedText = await extractText(file);
 
@@ -104,6 +145,7 @@ processFiles = async (req, res) => {
 
           storedFiles.push({
             filename: file.originalname,
+            file_id: fileDoc._id,
             status: "failed",
             reason: "No readable text found"
           });
@@ -151,6 +193,7 @@ processFiles = async (req, res) => {
 
           storedFiles.push({
             filename: file.originalname,
+            file_id: fileDoc._id,
             status: "failed",
             reason: "Unable to extract the text from the file, please try with some other file\n"
           });
@@ -250,7 +293,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
 
-  const MIN_SCORE = 0.56;
+  const MIN_SCORE = 0.53;
   const scoredChunks = await Promise.all(
     chunks.map(async (chunk) => {
       if (
@@ -275,7 +318,6 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     })
   );
 
-  console.log(scoredChunks);
 
 
   // return console.log(scoredChunks);
@@ -658,7 +700,7 @@ Label:
 
 const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
   if (!selectedFiles || selectedFiles.length === 0) {
-    throw new Error("No files selected but FILE_CONTEXT_REQUIRED triggered");
+    return "Please select atleast one file to continue";
   }
 
   // 1️⃣ Get file IDs
@@ -679,7 +721,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
   // 3️⃣ Embed the user question
   const questionEmbedding = await llmService.generateEmbedding(query);
   if (!questionEmbedding) {
-    throw new Error("Failed to embed query");
+    return "There was a problem on generating response, please try again after some time.";
   }
 
   // 4️⃣ Score chunks
@@ -748,12 +790,28 @@ const respond = async (req, res) => {
 
 
   const user = req.user;
+
+  await checkAndResetDailyUsage(user);
+
+  const userObj = await User.findById(user._id);
+  // return console.log(userObj);
+  if (!userObj.pro && userObj.dailyUsage.chatCount >= 7) {
+    return res.status(403).json({
+      message: "Daily chat limit reached, upgrade to pro version to enjoy services",
+      type: "limit"
+    });
+  }
+
+
+
   if (!query) {
     return res.status(400).json({
       status: false,
       error: "Question is required"
     });
   }
+
+
 
   // 🔥 STEP 0: detect intent FIRST
   const intent = await detectRoutingIntent(query);
@@ -774,6 +832,11 @@ const respond = async (req, res) => {
     return res.json({
       response: intent
     });
+  }
+
+  if (userObj) {
+    userObj.dailyUsage.chatCount += 1;
+    await userObj.save();
   }
 
   return res.json({

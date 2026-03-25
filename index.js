@@ -47,7 +47,7 @@ app.get('/api/memory/files', userMiddleware, async (req, res) => {
     const files = await File.find({ user_id: req.user._id });
     res.status(200).json(files);
   } catch (error) {
-    console.error("Error fetching files:", error);
+    // console.error("Error fetching files:", error);
     res.status(500).json({ message: "Internal server error" });
   }
 })
@@ -61,7 +61,13 @@ app.use("/api/payment", PaymentRouter);
 
 // Root route
 app.get("/", async (req, res) => {
-  // console.log("hi"); // MUST be 768
+  console.log("hi"); // MUST be 768
+});
+
+app.post("/api/lemonsqueezy/webhook", express.json(), (req, res) => {
+  console.log("🔥 WEBHOOK HIT");
+  console.log(req.body);
+  res.sendStatus(200);
 });
 
 

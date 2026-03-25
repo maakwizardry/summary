@@ -4,10 +4,13 @@ const crypto = require("crypto");
 const sendMail = require("../utils/sendMail");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
+const cron = require("node-cron");
 const { stat } = require("fs");
 
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const HOURS_LIMIT = 24;
+
 
 const register = async (req, res) => {
   try {
@@ -45,11 +48,11 @@ const register = async (req, res) => {
     // 6. TODO: Send OTP via email or SMS (e.g., using nodemailer or Twilio)
 
     if (status) {
-      return res.status(201).json({ message: "User registered successfully. Verify OTP.", otp, email: newUser.email });
+      return res.status(201).json({ message: "User registered successfully. Verify OTP.", email: newUser.email });
     }
     else {
       return res.status(500).json({
-        message: "User registered, but failed to send OTP email.",
+        message: "Failed to send OTP to the email.",
         error: status.error,
       });
     }
@@ -120,16 +123,16 @@ const verifyOtp = async (req, res) => {
     const user = await User.findOne({ email });
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "User not found, please try creating an account again!" });
     }
 
     if (user.isVerified) {
-      return res.status(400).json({ message: "User already verified" });
+      return res.status(400).json({ message: "User has been already verified" });
     }
 
     // Check OTP validity
     if (user.otp !== otp) {
-      return res.status(400).json({ message: "Invalid OTP" });
+      return res.status(400).json({ message: "Invalid OTP enetered" });
     }
 
 
@@ -232,6 +235,79 @@ const Google = async (req, res) => {
   }
 };
 
+const resendOtp = async (req, res) => {
+  try {
+
+    const { email } = req.body;
+
+    const user = await User.findOne({ email });
+
+    if (!user)
+      return res.status(404).json({ message: "User not found" });
+
+    if (user.isVerified)
+      return res.status(400).json({ message: "User already verified" });
 
 
-module.exports = { register, login, verifyOtp, getUserProfile, Google };
+    // 🔥 Cooldown Check
+    // if (
+    //    user.otpResendAvailableAt &&
+    //    user.otpResendAvailableAt > new Date()
+    // ) {
+    //    return res.status(429).json({
+    //       message: "Please wait before requesting new OTP"
+    //    });
+    // }
+
+
+    const newOtp = crypto.randomInt(100000, 999999);
+
+    user.otp = newOtp;
+    await user.save();
+
+
+    // ⭐ send mail function (your implementation)
+    const status = await sendMail({ to: email, subject: "OTP verification", otp: newOtp });
+
+    if (status) {
+      return res.json({
+        message: "OTP resent successfully"
+      });
+    }
+    res.json({
+      message: "Unable to resend OTP, please try again later!"
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+const deleteOldUnverifiedUsers = async () => {
+  try {
+
+    const cutoffTime = new Date(
+      Date.now() - HOURS_LIMIT * 60 * 60 * 1000
+    );
+
+    const result = await User.deleteMany({
+      isVerified: false,
+      date: { $lt: cutoffTime }
+    });
+
+    console.log(
+      `[CRON] Deleted ${result.deletedCount} unverified users`
+    );
+
+  } catch (err) {
+    console.error("[CRON ERROR]", err.message);
+  }
+};
+
+
+// runs every hour
+cron.schedule("0 * * * *", deleteOldUnverifiedUsers);
+
+
+module.exports = { register, resendOtp, login, verifyOtp, getUserProfile, Google, deleteOldUnverifiedUsers };

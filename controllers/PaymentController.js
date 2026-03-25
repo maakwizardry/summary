@@ -19,6 +19,7 @@ const headers = {
 
 
 const getProducts = async (req, res) => {
+    console.log("hit");
     try {
         const response = await axios.get(`${lsqyConfig.URL}/products`, {
             headers: headers,
@@ -42,8 +43,8 @@ const getVariants = async (req, res) => {
         })
 
 
-        const { id } = response.data.data[0];
-        res.status(200).json({ type: "Variants", id, status: true });
+
+        res.status(200).json({ type: "Variants", variants: response.data, status: true });
     }
     catch (error) {
         console.log(error);
