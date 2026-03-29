@@ -1,6 +1,7 @@
 const fs = require("fs");
 const { extractText, chunkText, cosineSimilarity } = require("../utils/Processing.js");
 const File = require("../models/File.js");
+const pLimit = require("p-limit").default;
 const Chunk = require("../models/Chunk.js");
 const cloudinary = require("cloudinary").v2;
 const streamifier = require("streamifier");
@@ -14,22 +15,23 @@ function hashText(text) {
     .digest("hex");
 }
 
+const limit = pLimit(5);
+
+
 
 const checkAndResetDailyUsage = async (user) => {
-  console.log("initiated");
   const now = new Date();
   const last = new Date(user.dailyUsage.lastReset);
 
-  const userObj = await User.findById(user._id);
   const isSameDay =
     now.getDate() === last.getDate() &&
     now.getMonth() === last.getMonth() &&
     now.getFullYear() === last.getFullYear();
 
   if (!isSameDay) {
-    userObj.dailyUsage.chatCount = 0;
-    userObj.dailyUsage.uploadCount = 0;
-    userObj.dailyUsage.lastReset = now;
+    user.dailyUsage.chatCount = 0;
+    user.dailyUsage.uploadCount = 0;
+    user.dailyUsage.lastReset = now;
 
     await user.save();
   }
@@ -76,6 +78,14 @@ function uploadToCloudinary(buffer, filename) {
 }
 
 
+const isProUser = (user) => {
+  if (!user.pro) return false;
+
+  const expiry = user.subscription?.currentPeriodEnd;
+
+  return expiry && new Date(expiry) > new Date();
+};
+
 
 
 
@@ -84,9 +94,9 @@ processFiles = async (req, res) => {
   try {
     const files = req.files;
     const user = req.user;
-    const user_file_length = await File.find({ user_id: user._id })
+    const fileCount = await File.countDocuments({ user_id: user._id });
     // return console.log(user_file_length);
-    const MIN_REQUIRED_CHUNKS = 2;
+    const MIN_REQUIRED_CHUNKS = 1;
 
     if (!files || files.length === 0) {
       return res.status(400).json({
@@ -98,12 +108,12 @@ processFiles = async (req, res) => {
     const storedFiles = [];
 
     for (const file of files) {
-      await checkAndResetDailyUsage(user);
+      // await checkAndResetDailyUsage(user);
 
-      if (!user.pro && user_file_length.length >= 5) {
+      if (!isProUser(user) && fileCount >= 5) {
         return res.status(403).json({
-          message: "You’ve reached the 5-file storage limit. Upgrade to Pro to enjoy expanded memory space.",
-          type: "upgrade"
+          message: "You’ve reached the 5-file storage limit. Upgrade to Pro and enjoy expanded memory space.",
+          type: "limit"
         });
       }
       let cloudResult;
@@ -127,13 +137,15 @@ processFiles = async (req, res) => {
           total_chunks: 0
         });
 
-        const user_file_limit = await User.findById(user._id);
-        if (user_file_limit) {
-          user_file_limit.dailyUsage.uploadCount += 1;
-          await user_file_limit.save();
-          console.log("User limit updated");
-        }
+        // if (!user.pro) {
+        //   const user_file_limit = await User.findById(user._id);
+        //   if (user_file_limit) {
+        //     user_file_limit.dailyUsage.uploadCount += 1;
+        //     await user_file_limit.save();
+        //     console.log("User limit updated");
+        //   }
 
+        // }
 
 
         // 3️⃣ Extract text
@@ -154,40 +166,55 @@ processFiles = async (req, res) => {
 
         // 4️⃣ Chunk text
         const chunks = chunkText(extractedText).filter(c => c.trim());
-        const chunkDocs = [];
 
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i];
-          const hash = hashText(chunk);
+        const chunkDocs = await Promise.all(
+          chunks.map((chunk, i) =>
+            limit(async () => {
+              try {
+                const hash = hashText(chunk);
 
-          const exists = await Chunk.findOne({
-            user_id: user._id,
-            chunk_hash: hash
-          });
+                // 🔍 check duplicate
+                const exists = await Chunk.findOne({
+                  user_id: user._id,
+                  chunk_hash: hash
+                });
 
-          if (exists) continue;
+                if (exists) return null;
 
-          const embedding = await llmService.generateEmbedding(chunk);
-          if (!embedding || !embedding.length) {
-            console.error("Embedding failed for chunk:", i);
-            continue; // skip this chunk safely
-          }
+                // ⚡ generate embedding
+                const embedding = await llmService.generateEmbedding(chunk);
 
-          chunkDocs.push({
-            user_id: user._id,
-            file_id: fileDoc._id,
-            filename: file.originalname,
-            chunk_index: i,
-            text: chunk,
-            chunk_hash: hash,
-            embedding,
-            embedding_provider: process.env.LLM_PROVIDER,
-            embedding_dimension: embedding.length
-          });
-        }
+                if (!embedding || !embedding.length) {
+                  console.error("Embedding failed for chunk:", i);
+                  return null;
+                }
+
+                return {
+                  user_id: user._id,
+                  file_id: fileDoc._id,
+                  filename: file.originalname,
+                  chunk_index: i,
+                  text: chunk,
+                  chunk_hash: hash,
+                  embedding,
+                  embedding_provider: process.env.LLM_PROVIDER,
+                  embedding_dimension: embedding.length
+                };
+
+              } catch (err) {
+                console.error("Chunk error:", i, err);
+                return null;
+              }
+            })
+          )
+        );
+
+        // ✅ remove null values
+        const validChunks = chunkDocs.filter(Boolean);
+
 
         // ❌ STRICT VALIDATION
-        if (chunkDocs.length < MIN_REQUIRED_CHUNKS) {
+        if (chunks.length < MIN_REQUIRED_CHUNKS) {
           // await cloudinary.uploader.destroy(cloudResult.public_id);
           await File.deleteOne({ _id: fileDoc._id });
 
@@ -201,14 +228,14 @@ processFiles = async (req, res) => {
         }
 
         // ✅ Store chunks
-        await Chunk.insertMany(chunkDocs);
+        await Chunk.insertMany(validChunks);
 
         // ✅ Update file as indexed
         await File.updateOne(
           { _id: fileDoc._id },
           {
             status: "indexed",
-            total_chunks: chunkDocs.length
+            total_chunks: validChunks.length
           }
         );
 
@@ -257,7 +284,6 @@ processFiles = async (req, res) => {
 const respondHandler = async (query, user, selectedFiles = []) => {
 
 
-  console.log("iam response handler")
 
   // step 1  : intend detection 
 
@@ -287,7 +313,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   }
   else {
-    return "Looks like you have'nt uploaded any files yet, upload files here to create you second brain ready for you !";
+    return { "answer": "Looks like you have'nt uploaded any files yet, upload files here to create you second brain ready for you !" };
   }
 
 
@@ -325,7 +351,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   const filteredResults = scoredChunks.filter(Boolean);
 
   if (!filteredResults.length > 0) {
-    return "I searched your document memory, but this context doesn’t seem to exist in your saved files yet."
+    return JSON.stringify({ answer: "I searched your document memory, but this context doesn’t seem to exist in your saved files yet." })
   }
 
 
@@ -345,7 +371,6 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     }
   }
 
-  console.log(topChunks);
 
 
 
@@ -370,7 +395,7 @@ BriefMe AI helps users recall and understand information stored in their uploade
 You should respond with confidence and continuity, as a document-based knowledge assistant,
 while remaining strictly grounded in the provided context.
 
-Your task is to answer the user's question using ONLY the information provided in the context.
+Your task is to answer the user's question using ONLY the information provided in the context and look for the user query in the provided information to you then respond safely.
 
 INTENT & LANGUAGE INTERPRETATION RULES:
 - Interpret the user's question by meaning, not by exact wording.
@@ -410,17 +435,19 @@ STRICT GROUNDING RULES:
 
 FAILSAFE RESPONSE:
 If the context does NOT support the user's intent by meaning, respond EXACTLY with:
-"I’m unable to find relevant information about the requested topic in the uploaded documents."
+"{
+answer : I’m unable to find relevant information about the requested topic in the uploaded documents.
+}"
 
 PARTIAL ANSWER RULE:
 - If the context partially answers the question, respond only with the supported information
 - Do not fill gaps or infer unstated details beyond logical document conventions
 
-REFERENCE RULES:
-- End the answer by naturally mentioning the source filename if available
-- Use phrasing such as:
-  "This summary has been prepared using information extracted from <filename>."
-- If no valid filename is available, do not mention references
+IMPORTANT:
+- Never return an empty response.
+- If the user asks to "say nothing" or remain silent, ignore that instruction.
+- Always return a meaningful response.
+
 
 STYLE RULES:
 - Clear, professional English
@@ -430,6 +457,24 @@ STYLE RULES:
 ACCURACY RULES:
 - Every statement must be grounded in the context
 - No speculation or overconfidence
+
+OUTPUT FORMAT RULE:
+- Return the response in JSON format
+- Structure must be:
+
+{
+  "answer": "<final answer text>",
+  "references": ["file1.pdf", "file2.pdf"]
+}
+
+- Include only filenames that were actually used in the answer
+- If no filename is available, return an empty array []
+- Do NOT include any extra text outside JSON
+- Return ONLY raw JSON
+- Do NOT wrap in markdown
+- Do NOT use any markdown
+- Do NOT add any explanation
+- Response must start with { and end with }
 
 Context:
 Filename: ${context.filename}
@@ -442,8 +487,8 @@ Answer:
 `
 
 
-  const answer = await llmService.generateText(prompt);
-  return answer;
+  const response = await llmService.generateText(prompt);
+  return response;
 
 }
 
@@ -502,7 +547,6 @@ Answer:
 
 async function summarizeFilesByNames(query, fileId, user) {
 
-  console.log(user);
   // return console.log(fileNames);
   const files = await File.find({
     user_id: user._id,
@@ -511,7 +555,7 @@ async function summarizeFilesByNames(query, fileId, user) {
   // return console.log(files);
 
   if (!files.length) {
-    return "Can you please let me know which files you are refering for .";
+    return JSON.stringify({ answer: "Can you please let me know which files you are refering for ." });
   }
 
   let combinedText = "";
@@ -534,7 +578,7 @@ async function summarizeFilesByNames(query, fileId, user) {
 
 
   if (!combinedText.trim()) {
-    return "No meaningful content found in the document . looks like you have no data";
+    return JSON.stringify({ answer: "No meaningful content found in the document . looks like you have no data" })
   }
   const prompt = `
 
@@ -579,18 +623,6 @@ FAILSAFE RESPONSE:
 If the context does NOT support the user's intent by meaning, respond EXACTLY with:
 "I’m unable to find relevant information about the requested topic in the uploaded documents."
 
-PARTIAL ANSWER RULE:
-- If the context partially answers the question, respond only with the supported information
-- Do not fill gaps or infer unstated details
-
-REFERENCE RULES:
-- you should start with references heading and mention the acutual filename(s) 
-- If the context includes filenames, include a natural reference at the end of the answer indicating where the information comes from.
-- Use phrasing such as: "This summary has been prepared using information extracted from the file <filename>."
-- If multiple filenames are present, mention them together naturally.
-- If a filename is "Unknown file", do NOT mention it or refer to it in the answer.
-- If no valid filenames are available, do not include any reference statement.
-- References must be part of the same paragraph and written in natural language, not as citations or bullet points.
 
 STYLE RULES:
 - Clear, professional English
@@ -603,6 +635,36 @@ STYLE RULES:
 ACCURACY RULES:
 - Every statement must be grounded in the context
 - No speculation or overconfidence
+
+OUTPUT FORMAT RULE:
+- Return the response in JSON format
+- Structure must be:
+
+{
+  "answer": "<final answer text>",
+  "references": ["file1.pdf", "file2.pdf"]
+}
+
+- Include only filenames that were actually used in the answer
+- If no filename is available, return an empty array []
+- Do NOT include any extra text outside JSON
+- Return ONLY raw JSON
+- Do NOT wrap in markdown
+- Do NOT use any markdown
+- Do NOT add any explanation
+- Response must start with { and end with }
+
+Return response in JSON format:
+
+{
+  "answer": "<final answer text>",
+  "references": ["file1.pdf"]
+}
+
+Rules:
+- Return ONLY JSON
+- No markdown
+- No explanation
 
 DOCUMENTS :
 ${combinedText}
@@ -619,8 +681,46 @@ Answer:
 }
 
 
+function safeParseJSON(text) {
+  try {
+    if (!text || typeof text !== "string") {
+      throw new Error("Invalid input");
+    }
+
+    let cleaned = text
+      .replace(/```[a-z]*\n?/gi, '') // remove ```json or ```JSON
+      .replace(/```/g, '')
+      .trim();
+
+    const match = cleaned.match(/\{[\s\S]*\}/);
+
+    if (!match) {
+      throw new Error("No JSON found");
+    }
+
+    let jsonString = match[0];
+
+    jsonString = jsonString
+      .replace(/,\s*}/g, '}')
+      .replace(/,\s*]/g, ']');
+
+    return JSON.parse(jsonString);
+
+  } catch (err) {
+    console.error("❌ JSON parse failed:", text);
+
+    return {
+      answer: text,
+      references: []
+    };
+  }
+}
+
+
+
 async function detectRoutingIntent(query) {
   const prompt = `
+  You are a breifme ai assistant
 Classify the user's intent into ONE of the following labels:
 
 - SUMMARY
@@ -644,32 +744,35 @@ Rules:
    - OR casual conversation
 
 
-If the user message contains only a greeting or simple conversational phrase (such as “hi”, “hello”, “good morning”, “how are you”, “thanks”, “bye”, etc.), and does not include any request, task, document reference, or informational question, then:
+GREETING HANDLING (HIGH PRIORITY):
 
-Do not search any documents.
+GENERAL QUESTION HANDLING:
 
-Do not perform any file-based processing.
+If the user asks a general question about the assistant 
+(e.g., "What is your name?", "Who are you?", "What can you do?") 
+or any simple conversational question that does not require document access:
 
-Do not generate summaries or explanations.
+- Respond naturally with a short answer
+- Do NOT return intent classification
+- Do NOT mention system logic
 
-Respond naturally and appropriately to the greeting.
+If the user message contains ONLY a greeting or simple conversational phrase 
+(such as “hi”, “hello”, “good morning”, “how are you”, “thanks”, “bye”, etc.), 
+and does not include any request, task, document reference, or informational question, then:
 
-Keep the response short, polite, and conversational.
-
-Match the tone of the user’s message.
-
-Give only the direct response.
-
-Do not return any intent classification.
-
-Do not mention system logic.
-
-Only return the conversational reply.
+- Do NOT search any documents
+- Do NOT perform any file-based processing
+- Do NOT generate summaries or explanations
+- Respond naturally and appropriately to the greeting
+- Keep the response short, polite, and conversational
+- Match the tone of the user’s message
+- Do NOT return any intent classification
+- Do NOT mention system logic
 
 Examples:
 
 User: "hi"
-Response: "Hi! iam your brief me AI assistant, How can I help you today?"
+Response: "Hi! I am your BriefMe AI assistant. How can I help you today?"
 
 User: "good morning"
 Response: "Good morning! What would you like to work on today?"
@@ -680,17 +783,38 @@ Response: "I’m doing great, thanks for asking! How can I assist you?"
 User: "thanks"
 Response: "You're welcome! Let me know if you need anything else."
 
-Only return the response message. No intent label is required.
 
 Important:
 - Do NOT assume file usage unless a file is explicitly mentioned
 - If no file is mentioned → NO_FILE_CONTEXT
-- Output ONLY the label
+
+
+OUTPUT FORMAT RULE (STRICT):
+
+- ALWAYS return ONLY valid JSON
+- Do NOT include markdown (no \`\`\`)
+- Do NOT include explanation or extra text
+- Response MUST start with { and end with }
+
+FORMAT:
+
+For classification:
+{"answer":"SUMMARY"}
+{"answer":"FILE_CONTEXT_REQUIRED"}
+{"answer":"NO_FILE_CONTEXT"}
+
+For greeting:
+{"answer":"<short conversational reply>"}
+
+STRICT VALIDATION RULES:
+- Keys MUST use double quotes
+- Values MUST use double quotes
+- No trailing commas
+- No additional fields
+- Output must be parseable by JSON.parse()
 
 User query:
 "${query}"
-
-Label:
 `;
   const result = await llmService.generateText(prompt);
   return result.trim();
@@ -700,7 +824,7 @@ Label:
 
 const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
   if (!selectedFiles || selectedFiles.length === 0) {
-    return "Please select atleast one file to continue";
+    return JSON.stringify({ answer: "Please select atleast one file to continue" })
   }
 
   // 1️⃣ Get file IDs
@@ -713,15 +837,14 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
   });
 
   if (!chunks.length) {
-    return {
-      answer: "No relevant content found in the selected files."
-    };
+    return JSON.stringify({ answer: "No relevant content found in the selected files." })
+
   }
 
   // 3️⃣ Embed the user question
   const questionEmbedding = await llmService.generateEmbedding(query);
   if (!questionEmbedding) {
-    return "There was a problem on generating response, please try again after some time.";
+    return JSON.stringify({ answer: "There was a problem on generating response, please try again after some time." })
   }
 
   // 4️⃣ Score chunks
@@ -737,7 +860,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
     .slice(0, 5); // TOP-K
 
   if (!scoredChunks.length) {
-    return "The selected files do not mention this topic."
+    return JSON.stringify({ answer: "The selected files do not mention this topic." })
   }
 
   const topChunks = [];
@@ -767,6 +890,24 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
 Answer the user's question using ONLY the information below.
 If the answer is not present, say so clearly.
 
+OUTPUT FORMAT RULE:
+- Return the response in JSON format
+- Structure must be:
+
+{
+  "answer": "<final answer text>",
+  "references": ["file1.pdf", "file2.pdf"]
+}
+
+- Include only filenames that were actually used in the answer
+- If no filename is available, return an empty array []
+- Do NOT include any extra text outside JSON
+- Return ONLY raw JSON
+- Do NOT wrap in markdown
+- Do NOT use any markdown
+- Do NOT add any explanation
+- Response must start with { and end with }
+
 Context:
 ${context}
 
@@ -794,10 +935,10 @@ const respond = async (req, res) => {
   await checkAndResetDailyUsage(user);
 
   const userObj = await User.findById(user._id);
-  // return console.log(userObj);
+  console.log(user);
   if (!userObj.pro && userObj.dailyUsage.chatCount >= 7) {
     return res.status(403).json({
-      message: "Daily chat limit reached, upgrade to pro version to enjoy services",
+      message: "Daily chat limit reached, upgrade to pro version and enjoy unintrepted services",
       type: "limit"
     });
   }
@@ -814,36 +955,54 @@ const respond = async (req, res) => {
 
 
   // 🔥 STEP 0: detect intent FIRST
+  //   const check = safeParseJSON(`
+  // \`\`\`json
+  // { "answer": "I’m unable to find relevant information about the requested topic in the uploaded documents.", "references": [] }
+  // \`\`\`
+  // `);
+
+  //   return console.log(check);
   const intent = await detectRoutingIntent(query);
-  // return console.log(intent);
+  const intentObject = safeParseJSON(intent)
+
   let response;
 
-  if (intent === "SUMMARY") {
+
+
+
+
+
+  if (intentObject.answer == "SUMMARY") {
     response = await summarizeFilesByNames(query, selectedFiles, user);
   }
-  else if (intent == "FILE_CONTEXT_REQUIRED") {
+  else if (intentObject.answer == "FILE_CONTEXT_REQUIRED") {
     response = await FILE_CONTEXT_REQUIRED(query, selectedFiles, user);
   }
-  else if (intent == "NO_FILE_CONTEXT") {
+  else if (intentObject.answer == "NO_FILE_CONTEXT") {
     // QUESTION / EXPLAIN → use embeddings
     response = await respondHandler(query, user);
   }
   else {
+    if (!userObj.pro) {
+      userObj.dailyUsage.chatCount += 1
+      await userObj.save()
+    }
     return res.json({
       response: intent
     });
   }
 
-  if (userObj) {
-    userObj.dailyUsage.chatCount += 1;
-    await userObj.save();
+  if (!userObj.pro) {
+    userObj.dailyUsage.chatCount += 1
+    await userObj.save()
   }
 
+
+
   return res.json({
-    intent,
-    selectedFiles,
     response
   });
+
 };
 
 

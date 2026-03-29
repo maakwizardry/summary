@@ -160,6 +160,9 @@ const getUserProfile = async (req, res) => {
     email: req.user.email,
     pro: req.user.pro,
     name: req.user.name, // include other safe fields
+    subscription: req.user.subscription,
+    createdAt: req.user.createdAt,
+    customerId: req.user.customerId
   });
 };
 
