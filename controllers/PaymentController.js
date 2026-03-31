@@ -1,5 +1,7 @@
 
 const { default: axios } = require('axios');
+const Subscription = require("../models/Subscription");
+const User = require("../models/User");
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
@@ -56,7 +58,18 @@ const subscribtion = async (req, res) => {
     try {
         const user = req.user;
         const { variantId, email, id } = req.body;
-        // console.log(typeOf(variantId));
+        const planExists = await Subscription.findOne(
+            { userId: user._id, status: "active" },
+        );
+
+        if (planExists) {
+            return res.status(400).json({
+                success: false,
+                message: `There is already an active plan exists, please cancel exisisting plan before purchasing of new one.`,
+                code: "ACTIVE_PLAN_EXISTS"
+            });
+        }
+
         // console.log(user);
 
         // return console.log(id);
@@ -74,7 +87,7 @@ const subscribtion = async (req, res) => {
                             }
                         },
                         product_options: {
-                            redirect_url: `http://localhost:5173/`,
+                            redirect_url: `http://localhost:5173/billing`,
                             receipt_button_text: "Go to Dashboard"
                         }
                     },
@@ -112,5 +125,26 @@ const subscribtion = async (req, res) => {
     }
 };
 
+const getSubscriptions = async (req, res) => {
+    try {
+        const userId = req.user._id; // from auth middleware
 
-module.exports = { getProducts, getVariants, subscribtion };
+        const subscriptions = await Subscription.find({ userId })
+            .sort({ createdAt: -1 }); // latest first
+
+        res.json({
+            success: true,
+            data: subscriptions
+        });
+
+    } catch (err) {
+        console.error("❌ Error fetching subscriptions:", err);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch subscriptions"
+        });
+    }
+}
+
+
+module.exports = { getProducts, getVariants, subscribtion, getSubscriptions };

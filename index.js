@@ -11,6 +11,7 @@ const connectDB = require("./config/db");
 const userMiddleware = require("./middleware/userMiddleware");
 const User = require('./models/User');
 const File = require('./models/File');
+const Subscription = require('./models/Subscription');
 
 
 
@@ -66,90 +67,154 @@ app.get("/", async (req, res) => {
 app.post("/api/lemonsqueezy/webhook", async (req, res) => {
   console.log("🔥 WEBHOOK HIT");
 
+
+  const event = req.body;
+
+  const eventName = event.meta?.event_name;
+  const userId = event.meta?.custom_data?.user_id;
+
+
+
+  // ❌ Safety check
+  if (!userId) {
+    console.log("❌ No userId found");
+    return res.sendStatus(200);
+  }
+
+  // =========================
+  // ✅ SUBSCRIPTION CREATED
+  // =========================
   try {
-    const event = req.body;
+    if (eventName === "subscription_created") {
+      // await Subscription.updateMany(
+      //   { userId: userId, status: "active" },
+      //   { status: "expired" }
+      // );
+      console.log(event);
 
-    const eventName = event.meta?.event_name;
-    const userId = event.meta?.custom_data?.user_id;
+      const sub = event.data;
+      const attr = sub.attributes; // ✅ FIXED
 
-    console.log("Event:", eventName);
-    console.log("User ID:", userId);
-
-    // ❌ Safety check
-    if (!userId) {
-      console.log("❌ No userId found");
+      const response = await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        {
+          subscriptionId: sub.id, // ✅ IMPORTANT
+          userId: userId,
+          customerId: attr.customer_id,
+          orderId: attr.order_id,
+          variantId: attr.variant_id,
+          productId: attr.product_id,
+          name: attr.product_name,
+          variantName: attr.variant_name,
+          status: attr.status,
+          plan: "pro",
+          startDate: new Date(attr.created_at), // ✅ better
+          currentPeriodEnd: new Date(attr.renews_at), // ✅ better
+          cancelled: attr.cancelled,
+          test_mode: attr.test_mode,
+          customerPortalUrl: attr.urls.customer_portal,
+          updatePaymentUrl: attr.urls.update_payment_method,
+        },
+        { upsert: true, new: true }
+      );
+      console.log(response);
+      console.log("✅ Subscription saved/updated");
       return res.sendStatus(200);
     }
 
-    // =========================
-    // ✅ SUBSCRIPTION CREATED
-    // =========================
-    if (eventName === "subscription_created") {
+  } catch (e) {
+    console.log(e);
+    return res.status(500)
+  }
+
+
+  // =========================
+  // 🔁 SUBSCRIPTION UPDATED
+  // =========================
+  if (eventName === "subscription_updated") {
+    try {
       const sub = event.data;
+      const attr = sub.attributes;
 
-      await User.findByIdAndUpdate(userId, {
-        pro: true,
-        customerId: sub.attributes.customer_id,
-        subscription: {
-          id: sub.id,
-          status: sub.attributes.status,
-          plan: "pro",
-          startDate: sub.attributes.created_at,
-          currentPeriodEnd: sub.attributes.renews_at,
-          variantId: sub.attributes.variant_id,
-          cancelled: false
+      await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id }, // 🔥 match using subscriptionId
+        {
+          status: attr.status,
+          currentPeriodEnd: new Date(attr.renews_at),
+          cancelled: attr.cancelled
         }
-      });
-
-      console.log("✅ User upgraded to PRO");
-    }
-
-    // =========================
-    // 🔁 SUBSCRIPTION UPDATED
-    // =========================
-    if (eventName === "subscription_updated") {
-      const sub = event.data; w
-
-      await User.findByIdAndUpdate(userId, {
-        "subscription.status": sub.attributes.status,
-        "subscription.currentPeriodEnd": sub.attributes.renews_at,
-        "subscription.cancelled": sub.attributes.cancelled
-      });
+      );
 
       console.log("🔁 Subscription updated");
-    }
+      return res.sendStatus(200);
 
-    // =========================
-    // ❌ SUBSCRIPTION CANCELLED
-    // =========================
-    if (eventName === "subscription_cancelled") {
+    } catch (err) {
+      console.error("❌ Error updating subscription:", err);
+      return res.sendStatus(500);
+    }
+  }
+
+  // =========================
+  // ❌ SUBSCRIPTION CANCELLED
+  // =========================
+  if (eventName === "subscription_cancelled") {
+    try {
+      const sub = event.data;
+      const attr = sub.attributes;
+
+      // ✅ Update Subscription collection
+      await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        {
+          status: "cancelled",
+          cancelled: true
+        }
+      );
+
+      // ✅ KEEP USER AS PRO (IMPORTANT)
       await User.findByIdAndUpdate(userId, {
-        pro: false,
-        "subscription.status": "cancelled",
-        "subscription.cancelled": true
+        pro: true
       });
 
-      console.log("❌ Subscription cancelled");
-    }
+      console.log("❌ Subscription cancelled (but still active until expiry)");
+      return res.sendStatus(200);
 
-    // =========================
-    // ⌛ SUBSCRIPTION EXPIRED
-    // =========================
-    if (eventName === "subscription_expired") {
+    } catch (err) {
+      console.error("❌ Error cancelling subscription:", err);
+      return res.sendStatus(500);
+    }
+  }
+
+  // =========================
+  // ⌛ SUBSCRIPTION EXPIRED
+  // =========================
+  if (eventName === "subscription_expired") {
+    try {
+      const sub = event.data;
+
+      // ✅ 1. Update Subscription collection (MAIN SOURCE)
+      await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        {
+          status: "expired"
+        }
+      );
+
+      // ✅ 2. Remove PRO access from user
       await User.findByIdAndUpdate(userId, {
-        pro: false,
-        "subscription.status": "expired"
+        pro: false
       });
 
       console.log("⌛ Subscription expired");
+      return res.sendStatus(200);
+
+    } catch (err) {
+      console.error("❌ Error handling expiry:", err);
+      return res.sendStatus(500);
     }
-
-    res.sendStatus(200);
-
-  } catch (err) {
-    console.error("Webhook Error:", err);
-    res.sendStatus(500);
   }
+
+
 });
 
 
