@@ -6,6 +6,7 @@ const Chunk = require("../models/Chunk.js");
 const cloudinary = require("cloudinary").v2;
 const streamifier = require("streamifier");
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const llmService = require("../provider/llmProvider.js");
 const User = require("../models/User.js");
 function hashText(text) {
@@ -19,7 +20,11 @@ const limit = pLimit(5);
 
 
 
-const checkAndResetDailyUsage = async (user) => {
+const checkAndResetDailyUsage = async (userInfo) => {
+  const user = await User.findById(userInfo._id)
+  if (user.pro) {
+    return;
+  }
   const now = new Date();
   const last = new Date(user.dailyUsage.lastReset);
 
@@ -283,6 +288,7 @@ processFiles = async (req, res) => {
 
 const respondHandler = async (query, user, selectedFiles = []) => {
 
+  console.log("Executed");
 
 
   // step 1  : intend detection 
@@ -292,13 +298,19 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
   const questionEmbedding = await llmService.generateEmbedding(query);     // step 1 : embed the query   i tested here for llmService embeddings are working
+  if (!questionEmbedding) {
+    return res.json({
+      answer: "Failed to process your query.",
+      references: []
+    });
+  }
 
 
   // return console.log(questionEmbedding);
   // step 2 : fetch chunks 
 
   const queryFilter = {
-    user_id: user._id
+    user_id: user._id.toString()
   };
 
   // return console.log(queryFilter);
@@ -306,70 +318,121 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
   if (selectedFiles.length > 0) {
     queryFilter.file_id = { $in: selectedFiles };
-  }
-
-  const chunks = await Chunk.find(queryFilter);
-  if (chunks.length > 0) {
 
   }
-  else {
-    return { "answer": "Looks like you have'nt uploaded any files yet, upload files here to create you second brain ready for you !" };
-  }
 
+  const chunks = await Chunk.aggregate([
+    {
+      $vectorSearch: {
+        queryVector: questionEmbedding,
+        path: "embedding",
+        numCandidates: 100,
+        limit: 5,
+        index: "vector_index",
+        filter: queryFilter
 
-
-
-  const MIN_SCORE = 0.53;
-  const scoredChunks = await Promise.all(
-    chunks.map(async (chunk) => {
-      if (
-        !chunk.embedding ||
-        chunk.embedding_provider !== process.env.LLM_PROVIDER ||
-        chunk.embedding_dimension !== questionEmbedding.length
-      ) {
-        return false;
       }
-      const score = cosineSimilarity(questionEmbedding, chunk.embedding);
-
-      if (score === null || score < MIN_SCORE) return false;
-
-      const file = await File.findById(chunk.file_id).select("filename");
-      console.log("filename : " + file);
-
-      return {
-        text: chunk.text,
-        score,
-        filename: file?.filename || "Unknown file",
-      };
-    })
-  );
-
-
-
-  // return console.log(scoredChunks);
-
-  const filteredResults = scoredChunks.filter(Boolean);
-
-  if (!filteredResults.length > 0) {
-    return JSON.stringify({ answer: "I searched your document memory, but this context doesn’t seem to exist in your saved files yet." })
-  }
-
-
-
-
-
-
-  const topChunks = [];
-
-  for (const c of filteredResults) {
-    if (topChunks.length < 5) {
-      topChunks.push(c);
-      topChunks.sort((a, b) => b.score - a.score);
-    } else if (c.score > topChunks[4].score) {
-      topChunks[4] = c;   // ✅ replace the WORST chunk
-      topChunks.sort((a, b) => b.score - a.score);
+    },
+    {
+      $project: {
+        text: 1,
+        file_id: 1,
+        score: { $meta: "vectorSearchScore" }
+      }
     }
+  ]);
+
+  console.log(chunks)
+
+
+  if (!chunks.length) {
+    return JSON.stringify({
+      answer: "I couldn’t find relevant information in your documents.",
+      references: []
+    });
   }
+
+  const fileIds = [...new Set(chunks.map(c => c.file_id.toString()))];
+
+  const files = await File.find({ _id: { $in: fileIds } })
+    .select("_id filename");
+
+  const fileMap = {};
+  files.forEach(f => {
+    fileMap[f._id.toString()] = f.filename;
+  });
+
+  const context = chunks
+    .map((c) => {
+      const filename = fileMap[c.file_id.toString()] || "Unknown";
+      return `File: ${filename}\n${c.text}`;
+    })
+    .join("\n\n");
+
+
+  console.log(context);
+  // const chunks = await Chunk.find(queryFilter);
+  // if (chunks.length > 0) {
+
+  // }
+  // else {
+  //   return { "answer": "Looks like you have'nt uploaded any files yet, upload files here to create you second brain ready for you !" };
+  // }
+
+
+
+
+  // const MIN_SCORE = 0.53;
+  // const scoredChunks = await Promise.all(
+  //   chunks.map(async (chunk) => {
+  //     if (
+  //       !chunk.embedding ||
+  //       chunk.embedding_provider !== process.env.LLM_PROVIDER ||
+  //       chunk.embedding_dimension !== questionEmbedding.length
+  //     ) {
+  //       return false;
+  //     }
+  //     const score = cosineSimilarity(questionEmbedding, chunk.embedding);
+
+  //     if (score === null || score < MIN_SCORE) return false;
+
+  //     const file = await File.findById(chunk.file_id).select("filename");
+  //     console.log("filename : " + file);
+
+  //     return {
+  //       text: chunk.text,
+  //       score,
+  //       filename: file?.filename || "Unknown file",
+  //     };
+  //   })
+  // );
+
+
+
+  // // return console.log(scoredChunks);
+
+  // const filteredResults = scoredChunks.filter(Boolean);
+
+  // if (!filteredResults.length > 0) {
+  //   return JSON.stringify({ answer: "I searched your document memory, but this context doesn’t seem to exist in your saved files yet." })
+  // }
+
+
+
+
+
+
+  // const topChunks = [];
+
+  // for (const c of filteredResults) {
+  //   if (topChunks.length < 5) {
+  //     topChunks.push(c);
+  //     topChunks.sort((a, b) => b.score - a.score);
+  //   } else if (c.score > topChunks[4].score) {
+  //     topChunks[4] = c;   // ✅ replace the WORST chunk
+  //     topChunks.sort((a, b) => b.score - a.score);
+  //   }
+  // }
 
 
 
@@ -379,114 +442,43 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   // }
 
 
-  const context =
-    selectedFiles.length > 0
-      ? topChunks.map((c, i) => `filename : ${c?.filename} \n context ${i + 1}:\n${c.text}`).join("\n\n")
-      : topChunks.map((c, i) => `filename : ${c?.filename} \n Context ${i + 1}:\n${c.text}`).join("\n\n");
-
   // return console.log(context);
 
 
-
   const prompt = `
-You are a professional AI assistant called BriefMe AI.
-
-BriefMe AI helps users recall and understand information stored in their uploaded documents.
-You should respond with confidence and continuity, as a document-based knowledge assistant,
-while remaining strictly grounded in the provided context.
-
-Your task is to answer the user's question using ONLY the information provided in the context and look for the user query in the provided information to you then respond safely.
-
-INTENT & LANGUAGE INTERPRETATION RULES:
-- Interpret the user's question by meaning, not by exact wording.
-- The user may use informal language, spelling mistakes, grammar errors, or shorthand.
-- Infer the intended meaning when the question is clear by context.
-- If the user asks about a person and an identifying number appears directly alongside the person’s name,
-  treat the number as an identifier such as a register number, roll number, or enrollment number,
-  if this interpretation is reasonable and consistent with academic or document conventions.
-- Do NOT imply personal memory, past conversations, or human experiences.
-
-SEMANTIC PARAPHRASE UNDERSTANDING RULE:
-- Treat differently worded sentences with the same meaning as equivalent.
-- Examples of equivalent meaning include:
-  good, beneficial, helpful, healthy, recommended → positive evaluation
-  bad, harmful, unhealthy, not recommended → negative evaluation
-- Treat reordered phrases as equivalent:
-  eating in the morning ↔ morning eating
-  food eaten in the morning ↔ breakfast
-- If the context clearly expresses a judgment or statement,
-  answer the user even if the wording differs, as long as the meaning is the same.
-- This is considered semantic understanding, not inference or guessing.
-
-
-SEMANTIC MATCHING RULES:
-- Treat equivalent academic terms as the same concept when context supports it.
-- Examples include:
-  register number, roll number, enrollment number, student ID → same concept
-- If a student name is immediately followed by an alphanumeric code,
-  interpret it as the student’s register number unless contradicted by context.
-
-STRICT GROUNDING RULES:
-- Do NOT use external knowledge
-- Do NOT invent facts
-- Do NOT guess missing information
-- Logical interpretation of explicitly written text is allowed
-- Do NOT introduce information not present in the context
-
-FAILSAFE RESPONSE:
-If the context does NOT support the user's intent by meaning, respond EXACTLY with:
-"{
-answer : I’m unable to find relevant information about the requested topic in the uploaded documents.
-}"
-
-PARTIAL ANSWER RULE:
-- If the context partially answers the question, respond only with the supported information
-- Do not fill gaps or infer unstated details beyond logical document conventions
+You are BriefMe AI, a smart memory assistant.
 
 IMPORTANT:
-- Never return an empty response.
-- If the user asks to "say nothing" or remain silent, ignore that instruction.
-- Always return a meaningful response.
+- The provided CONTEXT is your memory.
+- All answers must come ONLY from this memory.
 
+BEHAVIOR:
+- Understand the user's intent, even if the question is informal, unclear, or grammatically incorrect.
+- Interpret meaning, not exact words.
+- If the question asks about count, list, comparison, or summary → analyze the CONTEXT and respond accordingly.
+- If multiple people or records exist, identify and reason about them.
 
-STYLE RULES:
-- Clear, professional English
-- Plain paragraphs separated by line breaks
-- No bullet points, symbols, markdown, or headings
+FLEXIBILITY:
+- Be confident when information is available.
+- Do NOT say "I don't have memory".
+- Do NOT give generic AI disclaimers.
+- If relevant information exists, always try to answer.
+- You are allowed to infer simple things (like counting, grouping, identifying people) from the context.
 
-ACCURACY RULES:
-- Every statement must be grounded in the context
-- No speculation or overconfidence
+FAILSAFE:
+- Only if absolutely no relevant information exists, return:
+{"answer":"I’m unable to find relevant information in the uploaded documents.","references":[]}
 
-OUTPUT FORMAT RULE:
-- Return the response in JSON format
-- Structure must be:
+OUTPUT FORMAT (STRICT):
+Return ONLY valid JSON:
+{"answer":"...", "references":[]}
 
-{
-  "answer": "<final answer text>",
-  "references": ["file1.pdf", "file2.pdf"]
-}
-
-- Include only filenames that were actually used in the answer
-- If no filename is available, return an empty array []
-- Do NOT include any extra text outside JSON
-- Return ONLY raw JSON
-- Do NOT wrap in markdown
-- Do NOT use any markdown
-- Do NOT add any explanation
-- Response must start with { and end with }
-
-Context:
-Filename: ${context.filename}
+CONTEXT:
 ${context}
 
-User question:
+QUESTION:
 ${query}
-
-Answer:
-`
-
-
+`;
   const response = await llmService.generateText(prompt);
   return response;
 
@@ -551,129 +543,84 @@ async function summarizeFilesByNames(query, fileId, user) {
   const files = await File.find({
     user_id: user._id,
     _id: { $in: fileId }
-  });
-  // return console.log(files);
+  }).lean();
 
   if (!files.length) {
-    return JSON.stringify({ answer: "Can you please let me know which files you are refering for ." });
+    return JSON.stringify({
+      answer: "Please specify valid files."
+    });
   }
 
-  let combinedText = "";
+  const fileIds = files.map(f => f._id);
 
-  for (const file of files) {
-    combinedText += `Document Name or file name : ${file.filename}\n`;
-    const chunks = await Chunk.find({
-      file_id: file._id,
-      user_id: user._id
-    })
-      .sort({ chunk_index: 1 })
-      .limit(6);
+  const chunks = await Chunk.find({
+    file_id: { $in: fileIds },
+    user_id: user._id
+  })
+    .sort({ chunk_index: 1 })
+    .limit(12)
+    .lean();
 
-    for (const chunk of chunks) {
-      combinedText += chunk.text + "\n";
+  const fileMap = {};
+  files.forEach(f => {
+    fileMap[f._id.toString()] = {
+      filename: f.filename,
+      chunks: []
+    };
+  });
+
+  chunks.forEach(c => {
+    const key = c.file_id.toString();
+    if (fileMap[key]) {
+      fileMap[key].chunks.push(c.text.slice(0, 200));
     }
+  });
 
-    combinedText += "\n\n"; // separate documents
-  }
+  const combinedText = Object.values(fileMap)
+    .map(file => `File: ${file.filename}\n${file.chunks.join("\n")}`)
+    .join("\n\n");
 
 
   if (!combinedText.trim()) {
     return JSON.stringify({ answer: "No meaningful content found in the document . looks like you have no data" })
   }
   const prompt = `
+You are BriefMe AI.
 
-  You are a professional AI assistant called BriefMe AI.
+Your task is to summarize or explain the provided documents based ONLY on the given content.
 
-BriefMe AI helps users recall and understand information stored in their uploaded documents.
-You should respond with confidence and continuity, as a document-based knowledge assistant,
-while remaining strictly grounded in the provided context.
-
-Your task is to answer the user's question using ONLY the information provided in the context .
-
-INTENT & LANGUAGE INTERPRETATION RULES:
-- Interpret the user's question by meaning, not by exact wording.
-- The user may use informal language, spelling mistakes, grammar errors, or shorthand.
-- If the user's wording contains typos or incorrect grammar, infer the intended meaning.
-- If the user uses conversational phrases such as "do you remember", "do you know",
-  interpret them as asking whether information about the topic exists in the documents.
-- It is acceptable to respond with phrases like "Yes, I have information about..."
-  or "Yes, your documents describe...", if and only if the context supports it.
-- Do NOT imply personal memory, past conversations, or human experiences.
-
-SEMANTIC MATCHING RULES:
-- If different words or phrases clearly refer to the same concept described in the context,
-  treat them as equivalent.
-- Match informal or vague user expressions to formal terminology used in documents.
-- Rewrite the user's question internally using equivalent formal terms if needed,
-  without changing the original intent or adding new meaning.
-
-Examples of equivalence (do not mention these in the answer):
-- creator, builder, author, developer → same role if context supports it
-- app, system, project, tool → same entity if context defines one clearly
-- remember, know, aware of → existence of information in documents
-
-STRICT GROUNDING RULES:
-- Do NOT use external knowledge
-- Do NOT invent facts
-- Do NOT guess missing information
-- Do NOT assume details not present in the context
-- Only answer if the context reasonably supports the user's intent by meaning
-
-FAILSAFE RESPONSE:
-If the context does NOT support the user's intent by meaning, respond EXACTLY with:
-"I’m unable to find relevant information about the requested topic in the uploaded documents."
+CORE RULES:
+- Use ONLY the provided documents.
+- Do NOT use external knowledge.
+- Do NOT guess or add missing information.
+- Interpret the user’s request by meaning (handle typos, informal language, paraphrases).
 
 
-STYLE RULES:
+BEHAVIOR:
+- If the user asks to summarize → give a clear, concise summary.
+- If the user asks to explain → give a slightly detailed but easy-to-understand explanation.
+- If multiple documents are provided → combine insights logically.
+
+
+STYLE:
 - Clear, professional English
-- REFERENCES SHOULD BE MENTIONED AT THE END ONLY
-- Use clear formatting with short paragraphs separated by line breaks when it improves readability
-- Use plain paragraphs separated by line breaks.
-- Do NOT use bullet points, numbered lists, symbols, or markdown-style formatting.
-- No bullets, markdown, emojis, headings, or source mentions
+- Well-structured paragraphs
+- No bullet points, no markdown, no headings
+- Keep it concise but informative
 
-ACCURACY RULES:
-- Every statement must be grounded in the context
-- No speculation or overconfidence
-
-OUTPUT FORMAT RULE:
-- Return the response in JSON format
-- Structure must be:
-
-{
-  "answer": "<final answer text>",
-  "references": ["file1.pdf", "file2.pdf"]
-}
-
-- Include only filenames that were actually used in the answer
-- If no filename is available, return an empty array []
-- Do NOT include any extra text outside JSON
-- Return ONLY raw JSON
-- Do NOT wrap in markdown
-- Do NOT use any markdown
-- Do NOT add any explanation
-- Response must start with { and end with }
-
-Return response in JSON format:
-
-{
-  "answer": "<final answer text>",
-  "references": ["file1.pdf"]
-}
-
-Rules:
-- Return ONLY JSON
-- No markdown
-- No explanation
-
-DOCUMENTS :
+OUTPUT (STRICT JSON):
+if relevent information found return
+{"answer":"...", "references":[]}
+else return
+{"answer":"I’m unable to find relevant information in the uploaded documents."}
+DOCUMENTS:
 ${combinedText}
 
-User request:
-"${query}"
-
-Answer:
+USER REQUEST:
+${query}
 `;
+
+  console.log(prompt);
 
   return await llmService.generateText(prompt);
 
@@ -822,106 +769,133 @@ User query:
 }
 
 
+
 const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
+
   if (!selectedFiles || selectedFiles.length === 0) {
-    return JSON.stringify({ answer: "Please select atleast one file to continue" })
+    return JSON.stringify({
+      answer: "Please select at least one file to continue",
+      references: []
+    });
   }
 
-  // 1️⃣ Get file IDs
-  const fileIds = selectedFiles;
+  const objectFileIds = selectedFiles.map(
+    id => new mongoose.Types.ObjectId(id)
+  );
 
-  // 2️⃣ Fetch only relevant chunks (FAST & ACCURATE)
-  const chunks = await Chunk.find({
-    user_id: user._id,
-    file_id: { $in: fileIds }
-  });
+  const cleanQuery = query.replace(/@\S+/g, "").trim();
+
+  // 🔥 1. Generate embedding
+  const questionEmbedding = await llmService.generateEmbedding(cleanQuery);
+
+  if (!questionEmbedding) {
+    return JSON.stringify({
+      answer: "There was a problem generating response, please try again.",
+      references: []
+    });
+  }
+
+  // 🔥 2. Vector search (FAST)
+  const chunks = await Chunk.aggregate([
+    {
+      $vectorSearch: {
+        queryVector: questionEmbedding,
+        path: "embedding",
+        numCandidates: 80,
+        limit: 5,
+        index: "vector_index",
+        filter: {
+          user_id: user._id.toString(),
+          file_id: { $in: objectFileIds }
+        }
+      }
+    },
+    {
+      $project: {
+        text: 1,
+        file_id: 1
+      }
+    }
+  ]);
+
+  console.log(chunks);
 
   if (!chunks.length) {
-    return JSON.stringify({ answer: "No relevant content found in the selected files." })
-
+    return JSON.stringify({
+      answer: "The selected files do not mention this topic.",
+      references: []
+    });
   }
 
-  // 3️⃣ Embed the user question
-  const questionEmbedding = await llmService.generateEmbedding(query);
-  if (!questionEmbedding) {
-    return JSON.stringify({ answer: "There was a problem on generating response, please try again after some time." })
-  }
+  // 🔥 3. Fetch filenames (NO N+1)
+  const fileIds = [...new Set(chunks.map(c => c.file_id.toString()))];
 
-  // 4️⃣ Score chunks
-  const scoredChunks = chunks
-    .map(chunk => {
-      const score = cosineSimilarity(questionEmbedding, chunk.embedding);
-      return score >= 0.55
-        ? { text: chunk.text, score, file_id: chunk.file_id }
-        : null;
-    })
-    .filter(Boolean)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5); // TOP-K
+  const files = await File.find({ _id: { $in: fileIds } })
+    .select("_id filename")
+    .lean();
 
-  if (!scoredChunks.length) {
-    return JSON.stringify({ answer: "The selected files do not mention this topic." })
-  }
+  const fileMap = {};
+  files.forEach(f => {
+    fileMap[f._id.toString()] = f.filename;
+  });
 
-  const topChunks = [];
+  const topChunks = chunks
+    .sort((a, b) => b.score - a.score) // highest score first
+    .slice(0, 5); // top 3
 
-  for (const c of scoredChunks) {
-    if (topChunks.length < 5) {
-      topChunks.push(c);
-      topChunks.sort((a, b) => b.score - a.score);
-    } else if (c.score > topChunks[4].score) {
-      topChunks[4] = c;   // ✅ replace the WORST chunk
-      topChunks.sort((a, b) => b.score - a.score);
-    }
-  }
+  console.log(topChunks);
 
-
-
-  // 5️⃣ Prepare context for LLM
+  // 🔥 4. Build context (SMALL)
   const context = topChunks
-    .map(
-      (c, i) =>
-        `Source ${i + 1}:\n${c.text}`
-    )
+    .map((c, i) => {
+      const filename = fileMap[c.file_id.toString()] || "Unknown";
+      return `Source ${i + 1} (${filename}):\n${c.text}`;
+    })
     .join("\n\n");
 
-  // 6️⃣ Ask LLM (ANSWER, not summarize)
+  // 🔥 5. Prompt (clean + fast)
   const prompt = `
-Answer the user's question using ONLY the information below.
-If the answer is not present, say so clearly.
+You are BriefMe AI.
 
-OUTPUT FORMAT RULE:
-- Return the response in JSON format
-- Structure must be:
+Answer the user's question using ONLY the provided context.
 
-{
-  "answer": "<final answer text>",
-  "references": ["file1.pdf", "file2.pdf"]
-}
+RULES:
+- Do NOT use external knowledge.
+- Do NOT invent facts.
+- Use the most relevant information from the context.
 
-- Include only filenames that were actually used in the answer
-- If no filename is available, return an empty array []
-- Do NOT include any extra text outside JSON
-- Return ONLY raw JSON
-- Do NOT wrap in markdown
-- Do NOT use any markdown
-- Do NOT add any explanation
-- Response must start with { and end with }
+UNDERSTANDING:
+- Interpret the question by meaning, not exact wording.
+- Handle grammar mistakes and informal language.
+- Treat similar terms as equivalent:
+  work, working, job, role, position → same meaning
+  study, course, program → same meaning
 
-Context:
+ANSWERING:
+- If relevant information exists, answer clearly using it.
+- If information is partially available, give the best possible answer.
+- Only return object of {answer : "No information found in the context"} if absolutely no relevant information exists.
+
+STYLE:
+- Clear, direct, concise.
+- Answer only what is asked.
+
+OUTPUT (STRICT JSON):
+if relevent information found return
+{"answer":"...", "references":[]}
+else return
+{"answer":"I’m unable to find relevant information in the uploaded documents."}
+
+CONTEXT:
 ${context}
 
-Question:
+QUESTION:
 ${query}
-
-Answer:
 `;
 
-  const result = await llmService.generateText(prompt);
-
-  return result.trim()
-  // sources: scoredChunks.map(c => c.file_id)
+  return await llmService.generateText(prompt);
 };
+
 
 
 
@@ -931,7 +905,6 @@ const respond = async (req, res) => {
 
 
   const user = req.user;
-
   await checkAndResetDailyUsage(user);
 
   const userObj = await User.findById(user._id);
@@ -967,6 +940,8 @@ const respond = async (req, res) => {
 
   let response;
 
+  // return console.log(intent);
+
 
 
 
@@ -997,10 +972,12 @@ const respond = async (req, res) => {
     await userObj.save()
   }
 
+  const finalResponse = safeParseJSON(response);
+
 
 
   return res.json({
-    response
+    response: finalResponse
   });
 
 };

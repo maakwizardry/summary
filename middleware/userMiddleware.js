@@ -14,7 +14,7 @@ const protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET); // verify token
-    req.user = await User.findById(decoded.id).select("-password"); // attach user to req
+    req.user = await User.findById(decoded.id).select("_id email pro subscription.status").lean(); // attach user to req
     next();
   } catch (err) {
     return res.status(401).json({ message: "Token is invalid or expired" });

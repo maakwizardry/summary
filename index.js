@@ -10,6 +10,7 @@ const PaymentRouter = require("./routes/PaymentRoute");
 const connectDB = require("./config/db");
 const userMiddleware = require("./middleware/userMiddleware");
 const User = require('./models/User');
+const mongoose = require("mongoose");
 const File = require('./models/File');
 const Subscription = require('./models/Subscription');
 

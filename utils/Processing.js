@@ -35,7 +35,7 @@ async function extractText(file) {
 
 // ---------------- CHUNKING ----------------
 
-function chunkText(text, maxChars = 1200, overlapSentences = 2) {
+function chunkText(text, maxChars = 500, overlapSentences = 1) {
     if (!text || !text.trim()) return [];
 
     const clean = text
@@ -73,7 +73,13 @@ function chunkText(text, maxChars = 1200, overlapSentences = 2) {
 async function embedText(text) {
     if (!text || !text.trim()) return null;
 
-    const safeText = text.slice(0, 3000);
+    const normalized = text.replace(/\s+/g, " ").trim();
+
+    const safeText = normalized.length > 3000
+        ? normalized.slice(0, 3000) + "..."
+        : normalized;
+
+
 
     try {
         const result = await embeddingModel.embedContent({

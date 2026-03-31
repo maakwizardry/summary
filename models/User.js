@@ -38,30 +38,6 @@ const userSchema = new mongoose.Schema({
     },
 
     // 🔥 SUBSCRIPTION DETAILS
-    subscription: {
-        id: String,                     // Lemon subscription ID
-        status: {
-            type: String,
-            enum: ["active", "cancelled", "expired", "past_due", null],
-            default: null
-        },
-        plan: {
-            type: String,
-            default: null
-        },
-        startDate: Date,
-        currentPeriodEnd: Date,         // renews_at
-        variantId: String,              // plan identifier
-        cancelled: {
-            type: Boolean,
-            default: false
-        }
-    },
-
-    // 🔥 Lemon customer ID (keep outside for easy access)
-    customerId: {
-        type: String
-    },
 
     // 🔥 USAGE TRACKING
     dailyUsage: {
@@ -94,7 +70,7 @@ const userSchema = new mongoose.Schema({
     }
 
 }, {
-    timestamps: true // 🔥 replaces your manual "date"
+    timestamps: true
 });
 
 module.exports = mongoose.model("User", userSchema);
