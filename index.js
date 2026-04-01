@@ -10,6 +10,7 @@ const PaymentRouter = require("./routes/PaymentRoute");
 const connectDB = require("./config/db");
 const userMiddleware = require("./middleware/userMiddleware");
 const User = require('./models/User');
+const crypto = require("crypto");
 const mongoose = require("mongoose");
 const File = require('./models/File');
 const Subscription = require('./models/Subscription');
@@ -38,38 +39,42 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
-// Middleware
-app.use(express.json()); // Parse JSON bodies
-app.use(cors(corsOptions)); // Enable CORS with config
-app.use(morgan("dev"));  // Logger
+
+const secret = process.env.LEMON_SQUEEZY_WEBHOOK_SECRET;
 
 
-app.get('/api/memory/files', userMiddleware, async (req, res) => {
-  try {
-    const files = await File.find({ user_id: req.user._id });
-    res.status(200).json(files);
-  } catch (error) {
-    // console.error("Error fetching files:", error);
-    res.status(500).json({ message: "Internal server error" });
+const verifySignature = (rawBody, signature) => {
+  const hmac = crypto.createHmac("sha256", secret);
+
+  const digest = Buffer.from(
+    hmac.update(rawBody).digest("hex"),
+    "utf8"
+  );
+
+  const sig = Buffer.from(signature || "", "utf8");
+
+  // ❗ MUST check length before timingSafeEqual
+  if (digest.length !== sig.length) {
+    return false;
   }
-})
 
-app.use("/api/users", UserRouter);
-app.use("/api/process", BriefRouter);
-app.use("/api/contactus", ContactRouter);
-app.use("/api/payment", PaymentRouter);
+  return crypto.timingSafeEqual(digest, sig);
+};
 
 
-
-// Root route
-app.get("/", async (req, res) => {
-  console.log("hi"); // MUST be 768
-});
-app.post("/api/lemonsqueezy/webhook", async (req, res) => {
+app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   console.log("🔥 WEBHOOK HIT");
 
 
-  const event = req.body;
+  const signature = req.headers["x-signature"];
+
+  const isValid = verifySignature(req.body, signature);
+
+  if (!isValid) {
+    console.log("❌ Invalid signature");
+    return res.sendStatus(401);
+  }
+  const event = JSON.parse(req.body.toString());
 
   const eventName = event.meta?.event_name;
   const userId = event.meta?.custom_data?.user_id;
@@ -78,9 +83,12 @@ app.post("/api/lemonsqueezy/webhook", async (req, res) => {
 
   // ❌ Safety check
   if (!userId) {
-    console.log("❌ No userId found");
+    console.log("⚠️ (no userId):", eventName);
     return res.sendStatus(200);
   }
+
+  await Subscription.updateMany({ userId, status: "active" }, { status: "expired" });
+
 
   // =========================
   // ✅ SUBSCRIPTION CREATED
@@ -217,6 +225,35 @@ app.post("/api/lemonsqueezy/webhook", async (req, res) => {
 
 
 });
+
+// Middleware
+app.use(express.json()); // Parse JSON bodies
+app.use(cors(corsOptions)); // Enable CORS with config
+app.use(morgan("dev"));  // Logger
+
+
+app.get('/api/memory/files', userMiddleware, async (req, res) => {
+  try {
+    const files = await File.find({ user_id: req.user._id }).select("-status -mimetype -total_chunks -reason -user_id");
+    res.status(200).json(files);
+  } catch (error) {
+    // console.error("Error fetching files:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+})
+
+app.use("/api/users", UserRouter);
+app.use("/api/process", BriefRouter);
+app.use("/api/contactus", ContactRouter);
+app.use("/api/payment", PaymentRouter);
+
+
+
+// Root route
+app.get("/", async (req, res) => {
+  console.log("hi"); // MUST be 768
+});
+
 
 
 // app.post("/webhook", async (req, res) => {

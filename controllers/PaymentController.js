@@ -70,9 +70,7 @@ const subscribtion = async (req, res) => {
             });
         }
 
-        // console.log(user);
 
-        // return console.log(id);
 
         const response = await axios.post(
             "https://api.lemonsqueezy.com/v1/checkouts",

@@ -7,6 +7,7 @@ const cloudinary = require("cloudinary").v2;
 const streamifier = require("streamifier");
 const crypto = require("crypto");
 const mongoose = require("mongoose");
+const Subscription = require("../models/Subscription.js");
 const llmService = require("../provider/llmProvider.js");
 const User = require("../models/User.js");
 function hashText(text) {
@@ -17,6 +18,23 @@ function hashText(text) {
 }
 
 const limit = pLimit(5);
+
+function normalizeStructuredData(text) {
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+  const result = [];
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (!isNaN(lines[i + 1])) {
+      result.push(`${lines[i]}: ${lines[i + 1]}`);
+      i++;
+    } else {
+      result.push(lines[i]);
+    }
+  }
+
+  return result.join("\n");
+}
 
 
 
@@ -83,15 +101,23 @@ function uploadToCloudinary(buffer, filename) {
 }
 
 
-const isProUser = (user) => {
-  if (!user.pro) return false;
+const isProUser = async (user) => {
+  const userLimit = await Subscription.find({ userId: user._id, status: "active" });
+  if (!userLimit) return false;
 
-  const expiry = user.subscription?.currentPeriodEnd;
+  const expiry = userLimit?.currentPeriodEnd;
 
   return expiry && new Date(expiry) > new Date();
 };
 
 
+function createBatches(array, size) {
+  const batches = [];
+  for (let i = 0; i < array.length; i += size) {
+    batches.push(array.slice(i, i + size));
+  }
+  return batches;
+}
 
 
 
@@ -170,49 +196,101 @@ processFiles = async (req, res) => {
         }
 
         // 4️⃣ Chunk text
+        // const cleanText = normalizeStructuredData(extractedText);
         const chunks = chunkText(extractedText).filter(c => c.trim());
 
-        const chunkDocs = await Promise.all(
-          chunks.map((chunk, i) =>
-            limit(async () => {
-              try {
-                const hash = hashText(chunk);
+        const existingChunks = await Chunk.find({
+          user_id: user._id
+        }).select("chunk_hash");
 
-                // 🔍 check duplicate
-                const exists = await Chunk.findOne({
-                  user_id: user._id,
-                  chunk_hash: hash
-                });
-
-                if (exists) return null;
-
-                // ⚡ generate embedding
-                const embedding = await llmService.generateEmbedding(chunk);
-
-                if (!embedding || !embedding.length) {
-                  console.error("Embedding failed for chunk:", i);
-                  return null;
-                }
-
-                return {
-                  user_id: user._id,
-                  file_id: fileDoc._id,
-                  filename: file.originalname,
-                  chunk_index: i,
-                  text: chunk,
-                  chunk_hash: hash,
-                  embedding,
-                  embedding_provider: process.env.LLM_PROVIDER,
-                  embedding_dimension: embedding.length
-                };
-
-              } catch (err) {
-                console.error("Chunk error:", i, err);
-                return null;
-              }
-            })
-          )
+        const existingHashes = new Set(
+          existingChunks.map(c => c.chunk_hash)
         );
+
+        // const chunkDocs = await Promise.all(
+        //   chunks.map((chunk, i) =>
+        //     limit(async () => {
+        //       try {
+        //         const hash = hashText(chunk);
+
+        //         // 🔍 check duplicate
+        //         const exists = await Chunk.findOne({
+        //           user_id: user._id,
+        //           chunk_hash: hash
+        //         });
+
+        //         if (exists) return null;
+
+        //         // ⚡ generate embedding
+        //         const embedding = await llmService.generateEmbedding(chunk);
+
+        //         if (!embedding || !embedding.length) {
+        //           console.error("Embedding failed for chunk:", i);
+        //           return null;
+        //         }
+
+        //         return {
+        //           user_id: user._id,
+        //           file_id: fileDoc._id,
+        //           filename: file.originalname,
+        //           chunk_index: i,
+        //           text: chunk,
+        //           chunk_hash: hash,
+        //           embedding,
+        //           embedding_provider: process.env.LLM_PROVIDER,
+        //           embedding_dimension: embedding.length
+        //         };
+
+        //       } catch (err) {
+        //         console.error("Chunk error:", i, err);
+        //         return null;
+        //       }
+        //     })
+        //   )
+        // );
+
+        const BATCH_SIZE = 100;
+        const batches = createBatches(chunks, BATCH_SIZE);
+
+        const chunkDocs = [];
+
+        for (let b = 0; b < batches.length; b++) {
+          const batch = batches[b];
+
+          try {
+            // ⚡ Generate embeddings for full batch
+            const embeddings = await Promise.all(
+              batch.map(chunk => llmService.generateEmbedding(chunk))
+            );
+
+            for (let i = 0; i < batch.length; i++) {
+              const chunk = batch[i];
+              const embedding = embeddings[i];
+
+              if (!embedding || !embedding.length) continue;
+
+              const hash = hashText(chunk);
+
+              // 🔍 duplicate check
+              if (existingHashes.has(hash)) continue;
+
+              chunkDocs.push({
+                user_id: user._id,
+                file_id: fileDoc._id,
+                filename: file.originalname,
+                chunk_index: b * BATCH_SIZE + i,
+                text: chunk,
+                chunk_hash: hash,
+                embedding,
+                embedding_provider: process.env.LLM_PROVIDER,
+                embedding_dimension: embedding.length
+              });
+            }
+
+          } catch (err) {
+            console.error("Batch error:", b, err);
+          }
+        }
 
         // ✅ remove null values
         const validChunks = chunkDocs.filter(Boolean);
@@ -326,7 +404,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
       $vectorSearch: {
         queryVector: questionEmbedding,
         path: "embedding",
-        numCandidates: 100,
+        numCandidates: 500,
         limit: 5,
         index: "vector_index",
         filter: queryFilter
@@ -363,9 +441,9 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   });
 
   const context = chunks
-    .map((c) => {
+    .map((c, i) => {
       const filename = fileMap[c.file_id.toString()] || "Unknown";
-      return `File: ${filename}\n${c.text}`;
+      return `File: ${filename}\n chunk ${i + 1} : ${c.text}`;
     })
     .join("\n\n");
 
@@ -446,39 +524,67 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
   const prompt = `
-You are BriefMe AI, a smart memory assistant.
+  You are BriefMe AI, a smart memory assistant.
 
-IMPORTANT:
-- The provided CONTEXT is your memory.
-- All answers must come ONLY from this memory.
+TASK:
+Answer the user's request using ONLY the provided CONTEXT.
 
-BEHAVIOR:
-- Understand the user's intent, even if the question is informal, unclear, or grammatically incorrect.
-- Interpret meaning, not exact words.
-- If the question asks about count, list, comparison, or summary → analyze the CONTEXT and respond accordingly.
-- If multiple people or records exist, identify and reason about them.
+CORE RULES:
+- The CONTEXT is your only source.
+- Do NOT use external knowledge.
+- Do NOT copy raw text directly.
+- Understand and explain the data clearly.
+- You are NOT a general AI assistant.
+- You are ONLY a memory retrieval system.
+- NEVER say:
+  "I don't have information"
+  "I don’t know"
+  "No information about this person/thing/place..etc"
 
-FLEXIBILITY:
-- Be confident when information is available.
-- Do NOT say "I don't have memory".
-- Do NOT give generic AI disclaimers.
-- If relevant information exists, always try to answer.
-- You are allowed to infer simple things (like counting, grouping, identifying people) from the context.
+DATA HANDLING:
+- If the content is tabular, convert it into a clear readable paragraph.
+- Do NOT return structured data (no arrays, no objects inside answer).
+- Explain values in simple sentences.
 
-FAILSAFE:
-- Only if absolutely no relevant information exists, return:
-{"answer":"I’m unable to find relevant information in the uploaded documents.","references":[]}
+STRICT OUTPUT RULES (MANDATORY):
 
-OUTPUT FORMAT (STRICT):
-Return ONLY valid JSON:
-{"answer":"...", "references":[]}
+1. Return EXACTLY ONE JSON object.
+2. Format MUST be:
+   {"answer":"string","references":["file1","file2"]}
 
-CONTEXT:
+3. "answer":
+   - MUST be a STRING
+   - NEVER an array
+   - NEVER an object
+   - NEVER JSON inside
+
+4. "references":
+   - MUST be an array of filenames
+   - If none → []
+
+5. DO NOT:
+   - Wrap inside {"response": {...}}
+   - Return multiple objects
+   - Use any markdown
+
+  6. If no relevant information:
+  { "answer": "I’m unable to find relevant information in the uploaded documents.", "references": [] }
+
+FINAL CHECK BEFORE RETURN:
+  - Single object ? ✅
+  - answer is string ? ✅
+  - references is array ? ✅
+  - no extra keys ? ✅
+
+RETURN ONLY JSON.NO EXTRA TEXT.
+
+    CONTEXT:
 ${context}
 
-QUESTION:
+  QUESTION:
 ${query}
-`;
+  `
+
   const response = await llmService.generateText(prompt);
   return response;
 
@@ -585,40 +691,61 @@ async function summarizeFilesByNames(query, fileId, user) {
     return JSON.stringify({ answer: "No meaningful content found in the document . looks like you have no data" })
   }
   const prompt = `
-You are BriefMe AI.
+  You are BriefMe AI, a smart memory assistant.
 
-Your task is to summarize or explain the provided documents based ONLY on the given content.
+TASK:
+Answer the user's request using ONLY the provided CONTEXT.
 
 CORE RULES:
-- Use ONLY the provided documents.
+- The CONTEXT is your only source.
 - Do NOT use external knowledge.
-- Do NOT guess or add missing information.
-- Interpret the user’s request by meaning (handle typos, informal language, paraphrases).
+- Do NOT copy raw text directly.
+- Understand and explain the data clearly.
 
+DATA HANDLING:
+- If the content is tabular, convert it into a clear readable paragraph.
+- Do NOT return structured data (no arrays, no objects inside answer).
+- Explain values in simple sentences.
 
-BEHAVIOR:
-- If the user asks to summarize → give a clear, concise summary.
-- If the user asks to explain → give a slightly detailed but easy-to-understand explanation.
-- If multiple documents are provided → combine insights logically.
+STRICT OUTPUT RULES (MANDATORY):
 
+1. Return EXACTLY ONE JSON object.
+2. Format MUST be:
+   {"answer":"string","references":["file1","file2"]}
 
-STYLE:
-- Clear, professional English
-- Well-structured paragraphs
-- No bullet points, no markdown, no headings
-- Keep it concise but informative
+3. "answer":
+   - MUST be a STRING
+   - NEVER an array
+   - NEVER an object
+   - NEVER JSON inside
 
-OUTPUT (STRICT JSON):
-if relevent information found return
-{"answer":"...", "references":[]}
-else return
-{"answer":"I’m unable to find relevant information in the uploaded documents."}
-DOCUMENTS:
+4. "references":
+   - MUST be an array of filenames
+   - If none → []
+
+5. DO NOT:
+   - Wrap inside {"response": {...}}
+   - Return multiple objects
+   - Use any markdown
+
+  6. If no relevant information:
+  { "answer": "I’m unable to find relevant information in the uploaded documents.", "references": [] }
+
+FINAL CHECK BEFORE RETURN:
+  - Single object ? ✅
+  - answer is string ? ✅
+  - references is array ? ✅
+  - no extra keys ? ✅
+
+RETURN ONLY JSON.NO EXTRA TEXT.
+
+    CONTEXT:
 ${combinedText}
 
-USER REQUEST:
+  QUESTION:
 ${query}
-`;
+  `
+
 
   console.log(prompt);
 
@@ -629,6 +756,9 @@ ${query}
 
 
 function safeParseJSON(text) {
+  if (typeof (text) != "string") {
+    return text
+  }
   try {
     if (!text || typeof text !== "string") {
       throw new Error("Invalid input");
@@ -699,7 +829,7 @@ If the user asks a general question about the assistant
 (e.g., "What is your name?", "Who are you?", "What can you do?") 
 or any simple conversational question that does not require document access:
 
-- Respond naturally with a short answer
+- answer naturally with a short answer
 - Do NOT return intent classification
 - Do NOT mention system logic
 
@@ -710,25 +840,13 @@ and does not include any request, task, document reference, or informational que
 - Do NOT search any documents
 - Do NOT perform any file-based processing
 - Do NOT generate summaries or explanations
-- Respond naturally and appropriately to the greeting
+- answer naturally and appropriately to the greeting
 - Keep the response short, polite, and conversational
 - Match the tone of the user’s message
 - Do NOT return any intent classification
 - Do NOT mention system logic
+- Return aan object that contains answer as key for greetings.
 
-Examples:
-
-User: "hi"
-Response: "Hi! I am your BriefMe AI assistant. How can I help you today?"
-
-User: "good morning"
-Response: "Good morning! What would you like to work on today?"
-
-User: "how are you?"
-Response: "I’m doing great, thanks for asking! How can I assist you?"
-
-User: "thanks"
-Response: "You're welcome! Let me know if you need anything else."
 
 
 Important:
@@ -855,43 +973,60 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
 
   // 🔥 5. Prompt (clean + fast)
   const prompt = `
-You are BriefMe AI.
+  You are BriefMe AI, a smart memory assistant.
 
-Answer the user's question using ONLY the provided context.
+TASK:
+Answer the user's request using ONLY the provided CONTEXT.
 
-RULES:
+CORE RULES:
+- The CONTEXT is your only source.
 - Do NOT use external knowledge.
-- Do NOT invent facts.
-- Use the most relevant information from the context.
+- Do NOT copy raw text directly.
+- Understand and explain the data clearly.
 
-UNDERSTANDING:
-- Interpret the question by meaning, not exact wording.
-- Handle grammar mistakes and informal language.
-- Treat similar terms as equivalent:
-  work, working, job, role, position → same meaning
-  study, course, program → same meaning
+DATA HANDLING:
+- If the content is tabular, convert it into a clear readable paragraph.
+- Do NOT return structured data (no arrays, no objects inside answer).
+- Explain values in simple sentences.
 
-ANSWERING:
-- If relevant information exists, answer clearly using it.
-- If information is partially available, give the best possible answer.
-- Only return object of {answer : "No information found in the context"} if absolutely no relevant information exists.
+STRICT OUTPUT RULES (MANDATORY):
 
-STYLE:
-- Clear, direct, concise.
-- Answer only what is asked.
+1. Return EXACTLY ONE JSON object.
+2. Format MUST be:
+   {"answer":"string","references":["file1","file2"]}
 
-OUTPUT (STRICT JSON):
-if relevent information found return
-{"answer":"...", "references":[]}
-else return
-{"answer":"I’m unable to find relevant information in the uploaded documents."}
+3. "answer":
+   - MUST be a STRING
+   - NEVER an array
+   - NEVER an object
+   - NEVER JSON inside
 
-CONTEXT:
+4. "references":
+   - MUST be an array of filenames
+   - If none → []
+
+5. DO NOT:
+   - Wrap inside {"response": {...}}
+   - Return multiple objects
+   - Use any markdown
+
+  6. If no relevant information:
+  { "answer": "I’m unable to find relevant information in the uploaded documents.", "references": [] }
+
+FINAL CHECK BEFORE RETURN:
+  - Single object ? ✅
+  - answer is string ? ✅
+  - references is array ? ✅
+  - no extra keys ? ✅
+
+RETURN ONLY JSON.NO EXTRA TEXT.
+
+    CONTEXT:
 ${context}
 
-QUESTION:
+  QUESTION:
 ${query}
-`;
+  `
 
   return await llmService.generateText(prompt);
 };
@@ -908,7 +1043,6 @@ const respond = async (req, res) => {
   await checkAndResetDailyUsage(user);
 
   const userObj = await User.findById(user._id);
-  console.log(user);
   if (!userObj.pro && userObj.dailyUsage.chatCount >= 7) {
     return res.status(403).json({
       message: "Daily chat limit reached, upgrade to pro version and enjoy unintrepted services",
@@ -958,24 +1092,17 @@ const respond = async (req, res) => {
     response = await respondHandler(query, user);
   }
   else {
-    if (!userObj.pro) {
-      userObj.dailyUsage.chatCount += 1
-      await userObj.save()
-    }
-    return res.json({
-      response: intent
-    });
+    response = intentObject
   }
 
+
+
+
+  const finalResponse = safeParseJSON(response);
   if (!userObj.pro) {
     userObj.dailyUsage.chatCount += 1
     await userObj.save()
   }
-
-  const finalResponse = safeParseJSON(response);
-
-
-
   return res.json({
     response: finalResponse
   });

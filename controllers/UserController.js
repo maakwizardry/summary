@@ -43,7 +43,7 @@ const register = async (req, res) => {
     });
 
     await newUser.save();
-    const status = sendMail({ to: newUser.email, subject: "OTP verification", otp: newUser.otp });
+    const status = sendMail({ to: newUser.email, subject: "Verify your account", otp: newUser.otp });
 
     // 6. TODO: Send OTP via email or SMS (e.g., using nodemailer or Twilio)
 
@@ -116,6 +116,7 @@ const verifyOtp = async (req, res) => {
     const { email, otp } = req.body;
 
 
+
     if (!email || !otp) {
       return res.status(400).json({ message: "Email and OTP are required" });
     }
@@ -130,6 +131,7 @@ const verifyOtp = async (req, res) => {
       return res.status(400).json({ message: "User has been already verified" });
     }
 
+
     // Check OTP validity
     if (user.otp !== otp) {
       return res.status(400).json({ message: "Invalid OTP enetered" });
@@ -141,7 +143,22 @@ const verifyOtp = async (req, res) => {
     user.otp = null;
     await user.save();
 
-    res.status(200).json({ message: "OTP verified successfully" });
+    if (email) {
+      const user = await User.findOne({ email });
+      if (user) {
+        const token = jwt.sign(
+          { id: user._id, email: user.email },
+          process.env.JWT_SECRET,
+          { expiresIn: "1d" }
+        );
+
+        return res.status(200).json({ message: "OTP verified successfully", token, email });
+
+      }
+
+    }
+
+    return res.status(200).json({ message: "OTP verified successfully" });
   } catch (error) {
     console.error("Verify OTP Error:", error);
     res.status(500).json({ message: "Server error" });
@@ -157,6 +174,7 @@ const getUserProfile = async (req, res) => {
 
   res.status(200).json({
     id: req.user._id,
+    username: req.user.username,
     email: req.user.email,
     pro: req.user.pro,
     name: req.user.name, // include other safe fields
@@ -242,6 +260,7 @@ const resendOtp = async (req, res) => {
   try {
 
     const { email } = req.body;
+    console.log(email);
 
     const user = await User.findOne({ email });
 
@@ -270,7 +289,7 @@ const resendOtp = async (req, res) => {
 
 
     // ⭐ send mail function (your implementation)
-    const status = await sendMail({ to: email, subject: "OTP verification", otp: newOtp });
+    const status = await sendMail({ to: email, subject: "Verify your account", otp: newOtp });
 
     if (status) {
       return res.json({
@@ -282,6 +301,8 @@ const resendOtp = async (req, res) => {
     });
 
   } catch (err) {
+    console.log("hit");
+    console.log(err);
     res.status(500).json({ message: err.message });
   }
 };
