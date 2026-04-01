@@ -9,15 +9,15 @@ const protect = async (req, res, next) => {
   }
 
   if (!token) {
-    return res.status(401).json({ message: "Not authorized" });
+    return res.status(401).json({ message: "Not authorized", success: false });
   }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET); // verify token
-    req.user = await User.findById(decoded.id).select("-password"); // attach user to req
+    req.user = await User.findById(decoded.id).select("_id username email pro subscription.status").lean(); // attach user to req
     next();
   } catch (err) {
-    res.status(401).json({ message: "Token is invalid or expired" });
+    return res.status(401).json({ message: "Token is invalid or expired" });
   }
 };
 

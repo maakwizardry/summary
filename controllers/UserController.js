@@ -3,21 +3,28 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const sendMail = require("../utils/sendMail");
 const jwt = require("jsonwebtoken");
+const { OAuth2Client } = require("google-auth-library");
+const cron = require("node-cron");
 const { stat } = require("fs");
+
+
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const HOURS_LIMIT = 24;
+
 
 const register = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { username, email, password } = req.body;
 
     // 1. Validate inputs
-    if (!email || !password) {
+    if (!email || !password || !username) {
       return res.status(400).json({ message: "All fields are required" });
     }
 
     // 2. Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ message: "Email already registered" });
+      return res.status(400).json({ message: "Email already registered", existingUser });
     }
 
     // 3. Hash the password
@@ -29,23 +36,23 @@ const register = async (req, res) => {
 
     // 5. Create new user
     const newUser = new User({
+      username,
       email,
       password: hashedPassword,
       otp,
-      isVerified: true, // until OTP is verified
     });
 
     await newUser.save();
-    const status = sendMail({to : newUser.email, subject : "OTP verification", otp : newUser.otp});
+    const status = sendMail({ to: newUser.email, subject: "Verify your account", otp: newUser.otp });
 
     // 6. TODO: Send OTP via email or SMS (e.g., using nodemailer or Twilio)
 
     if (status) {
-      return res.status(201).json({ message: "User registered successfully. Verify OTP.", otp, email: newUser.email });
+      return res.status(201).json({ message: "User registered successfully. Verify OTP.", email: newUser.email });
     }
     else {
       return res.status(500).json({
-        message: "User registered, but failed to send OTP email.",
+        message: "Failed to send OTP to the email.",
         error: status.error,
       });
     }
@@ -94,6 +101,7 @@ const login = async (req, res) => {
     return res.status(200).json({
       message: "Login successful",
       token,
+      email: user.email
     });
   } catch (error) {
     console.error(error);
@@ -108,6 +116,7 @@ const verifyOtp = async (req, res) => {
     const { email, otp } = req.body;
 
 
+
     if (!email || !otp) {
       return res.status(400).json({ message: "Email and OTP are required" });
     }
@@ -115,16 +124,17 @@ const verifyOtp = async (req, res) => {
     const user = await User.findOne({ email });
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      return res.status(404).json({ message: "User not found, please try creating an account again!" });
     }
 
     if (user.isVerified) {
-      return res.status(400).json({ message: "User already verified" });
+      return res.status(400).json({ message: "User has been already verified" });
     }
+
 
     // Check OTP validity
     if (user.otp !== otp) {
-      return res.status(400).json({ message: "Invalid OTP" });
+      return res.status(400).json({ message: "Invalid OTP enetered" });
     }
 
 
@@ -133,7 +143,22 @@ const verifyOtp = async (req, res) => {
     user.otp = null;
     await user.save();
 
-    res.status(200).json({ message: "OTP verified successfully" });
+    if (email) {
+      const user = await User.findOne({ email });
+      if (user) {
+        const token = jwt.sign(
+          { id: user._id, email: user.email },
+          process.env.JWT_SECRET,
+          { expiresIn: "1d" }
+        );
+
+        return res.status(200).json({ message: "OTP verified successfully", token, email });
+
+      }
+
+    }
+
+    return res.status(200).json({ message: "OTP verified successfully" });
   } catch (error) {
     console.error("Verify OTP Error:", error);
     res.status(500).json({ message: "Server error" });
@@ -146,16 +171,167 @@ const getUserProfile = async (req, res) => {
   if (!req.user) {
     return res.status(404).json({ message: "User not found" });
   }
-  
+
   res.status(200).json({
     id: req.user._id,
+    username: req.user.username,
     email: req.user.email,
-    pro : req.user.pro,
+    pro: req.user.pro,
     name: req.user.name, // include other safe fields
+    subscription: req.user.subscription,
+    createdAt: req.user.createdAt,
+    customerId: req.user.customerId
   });
 };
 
+const Google = async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ message: "Google token missing" });
+    }
+
+    // 1️⃣ Verify Google token
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const { email, email_verified, sub: googleId } = payload;
+
+    if (!email || !email_verified) {
+      return res.status(401).json({ message: "Google email not verified" });
+    }
+
+    // 2️⃣ Find user by EMAIL ONLY
+    let user = await User.findOne({ email });
+
+    // 3️⃣ If user exists
+    if (user) {
+      // 🚫 Email/password user trying Google
+      if (user.authProvider === "local") {
+        return res.status(409).json({
+          message: "An account already exists with this email please try to use login with password .",
+        });
+      }
+
+      // ✅ Google user logging in again
+      if (!user.googleId) {
+        user.googleId = googleId;
+        await user.save();
+      }
+    }
+
+    // 4️⃣ Create new Google user if not exists
+    if (!user) {
+      user = await User.create({
+        email,
+        password: "GOOGLE_AUTH",
+        googleId,
+        authProvider: "google",
+        isVerified: true,
+        limit: 0,
+        pro: false,
+      });
+    }
+
+    // 5️⃣ Issue app JWT
+    const appToken = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res.status(200).json({
+      token: appToken,
+      email: user.email,
+      userId: user._id,
+      status: true,
+    });
+
+  } catch (err) {
+    console.error("Google Sign-In Error:", err);
+    return res.status(401).json({ message: "Invalid Google token" });
+  }
+};
+
+const resendOtp = async (req, res) => {
+  try {
+
+    const { email } = req.body;
+    console.log(email);
+
+    const user = await User.findOne({ email });
+
+    if (!user)
+      return res.status(404).json({ message: "User not found" });
+
+    if (user.isVerified)
+      return res.status(400).json({ message: "User already verified" });
 
 
+    // 🔥 Cooldown Check
+    // if (
+    //    user.otpResendAvailableAt &&
+    //    user.otpResendAvailableAt > new Date()
+    // ) {
+    //    return res.status(429).json({
+    //       message: "Please wait before requesting new OTP"
+    //    });
+    // }
 
-module.exports = { register, login, verifyOtp, getUserProfile };
+
+    const newOtp = crypto.randomInt(100000, 999999);
+
+    user.otp = newOtp;
+    await user.save();
+
+
+    // ⭐ send mail function (your implementation)
+    const status = await sendMail({ to: email, subject: "Verify your account", otp: newOtp });
+
+    if (status) {
+      return res.json({
+        message: "OTP resent successfully"
+      });
+    }
+    res.json({
+      message: "Unable to resend OTP, please try again later!"
+    });
+
+  } catch (err) {
+    console.log("hit");
+    console.log(err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+const deleteOldUnverifiedUsers = async () => {
+  try {
+
+    const cutoffTime = new Date(
+      Date.now() - HOURS_LIMIT * 60 * 60 * 1000
+    );
+
+    const result = await User.deleteMany({
+      isVerified: false,
+      date: { $lt: cutoffTime }
+    });
+
+    console.log(
+      `[CRON] Deleted ${result.deletedCount} unverified users`
+    );
+
+  } catch (err) {
+    console.error("[CRON ERROR]", err.message);
+  }
+};
+
+
+// runs every hour
+cron.schedule("0 * * * *", deleteOldUnverifiedUsers);
+
+
+module.exports = { register, resendOtp, login, verifyOtp, getUserProfile, Google, deleteOldUnverifiedUsers };

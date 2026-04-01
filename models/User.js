@@ -1,32 +1,76 @@
 const mongoose = require("mongoose");
-const userSchema = mongoose.Schema({
+
+const userSchema = new mongoose.Schema({
+    username: {
+        type: String,
+        trim: true
+    },
+
     email: {
         type: String,
         required: true,
         unique: true,
+        lowercase: true,
+        trim: true
     },
+
     password: {
         type: String,
-        required: true,
+        required: function () {
+            return this.authProvider === "local";
+        }
     },
-    pro : {
-        type : Boolean,
-        default : false
+
+    googleId: {
+        type: String
     },
-    otp: {
+
+    authProvider: {
         type: String,
+        enum: ["local", "google"],
+        default: "local"
     },
-    limit : {
-        type : Number,
-        default : 0,
+
+    // 🔥 QUICK ACCESS FLAG (important)
+    pro: {
+        type: Boolean,
+        default: false
     },
+
+    // 🔥 SUBSCRIPTION DETAILS
+
+    // 🔥 USAGE TRACKING
+    dailyUsage: {
+        chatCount: {
+            type: Number,
+            default: 0
+        },
+        uploadCount: {
+            type: Number,
+            default: 0
+        },
+        lastReset: {
+            type: Date,
+            default: Date.now
+        }
+    },
+
+    // 🔐 AUTH / VERIFICATION
+    otp: String,
+
     isVerified: {
         type: Boolean,
-        default: false,
+        default: false
     },
-    date: {
-        type: Date,
-        default: Date.now,
+
+    // ⚡ FEATURE LIMIT CONTROL (for free users)
+    limit: {
+        type: Number,
+        default: 0
     }
-})
+
+}, {
+    timestamps: true
+});
+
 module.exports = mongoose.model("User", userSchema);

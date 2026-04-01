@@ -9,7 +9,13 @@ const ContactRouter = require("./routes/ContactRoute");
 const PaymentRouter = require("./routes/PaymentRoute");
 const connectDB = require("./config/db");
 const userMiddleware = require("./middleware/userMiddleware");
-const UserModel = require('./models/User');
+const User = require('./models/User');
+const crypto = require("crypto");
+const mongoose = require("mongoose");
+const File = require('./models/File');
+const Subscription = require('./models/Subscription');
+
+
 
 // Load env variables
 dotenv.config();
@@ -33,13 +39,210 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization']
 };
 
+
+const secret = process.env.LEMON_SQUEEZY_WEBHOOK_SECRET;
+
+
+const verifySignature = (rawBody, signature) => {
+  const hmac = crypto.createHmac("sha256", secret);
+
+  const digest = Buffer.from(
+    hmac.update(rawBody).digest("hex"),
+    "utf8"
+  );
+
+  const sig = Buffer.from(signature || "", "utf8");
+
+  // ❗ MUST check length before timingSafeEqual
+  if (digest.length !== sig.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(digest, sig);
+};
+
+
+app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  console.log("🔥 WEBHOOK HIT");
+
+
+  const signature = req.headers["x-signature"];
+
+  const isValid = verifySignature(req.body, signature);
+
+  if (!isValid) {
+    console.log("❌ Invalid signature");
+    return res.sendStatus(401);
+  }
+  const event = JSON.parse(req.body.toString());
+
+  const eventName = event.meta?.event_name;
+  const userId = event.meta?.custom_data?.user_id;
+
+
+
+  // ❌ Safety check
+  if (!userId) {
+    console.log("⚠️ (no userId):", eventName);
+    return res.sendStatus(200);
+  }
+
+  await Subscription.updateMany({ userId, status: "active" }, { status: "expired" });
+
+
+  // =========================
+  // ✅ SUBSCRIPTION CREATED
+  // =========================
+  try {
+    if (eventName === "subscription_created") {
+      // await Subscription.updateMany(
+      //   { userId: userId, status: "active" },
+      //   { status: "expired" }
+      // );
+      console.log(event);
+
+      const sub = event.data;
+      const attr = sub.attributes; // ✅ FIXED
+
+      const response = await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        {
+          subscriptionId: sub.id, // ✅ IMPORTANT
+          userId: userId,
+          customerId: attr.customer_id,
+          orderId: attr.order_id,
+          variantId: attr.variant_id,
+          productId: attr.product_id,
+          name: attr.product_name,
+          variantName: attr.variant_name,
+          status: attr.status,
+          plan: "pro",
+          startDate: new Date(attr.created_at), // ✅ better
+          currentPeriodEnd: new Date(attr.renews_at), // ✅ better
+          cancelled: attr.cancelled,
+          test_mode: attr.test_mode,
+          customerPortalUrl: attr.urls.customer_portal,
+          updatePaymentUrl: attr.urls.update_payment_method,
+        },
+        { upsert: true, new: true }
+      );
+      console.log(response);
+      console.log("✅ Subscription saved/updated");
+      return res.sendStatus(200);
+    }
+
+  } catch (e) {
+    console.log(e);
+    return res.status(500)
+  }
+
+
+  // =========================
+  // 🔁 SUBSCRIPTION UPDATED
+  // =========================
+  if (eventName === "subscription_updated") {
+    try {
+      const sub = event.data;
+      const attr = sub.attributes;
+
+      await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id }, // 🔥 match using subscriptionId
+        {
+          status: attr.status,
+          currentPeriodEnd: new Date(attr.renews_at),
+          cancelled: attr.cancelled
+        }
+      );
+
+      console.log("🔁 Subscription updated");
+      return res.sendStatus(200);
+
+    } catch (err) {
+      console.error("❌ Error updating subscription:", err);
+      return res.sendStatus(500);
+    }
+  }
+
+  // =========================
+  // ❌ SUBSCRIPTION CANCELLED
+  // =========================
+  if (eventName === "subscription_cancelled") {
+    try {
+      const sub = event.data;
+      const attr = sub.attributes;
+
+      // ✅ Update Subscription collection
+      await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        {
+          status: "cancelled",
+          cancelled: true
+        }
+      );
+
+      // ✅ KEEP USER AS PRO (IMPORTANT)
+      await User.findByIdAndUpdate(userId, {
+        pro: true
+      });
+
+      console.log("❌ Subscription cancelled (but still active until expiry)");
+      return res.sendStatus(200);
+
+    } catch (err) {
+      console.error("❌ Error cancelling subscription:", err);
+      return res.sendStatus(500);
+    }
+  }
+
+  // =========================
+  // ⌛ SUBSCRIPTION EXPIRED
+  // =========================
+  if (eventName === "subscription_expired") {
+    try {
+      const sub = event.data;
+
+      // ✅ 1. Update Subscription collection (MAIN SOURCE)
+      await Subscription.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        {
+          status: "expired"
+        }
+      );
+
+      // ✅ 2. Remove PRO access from user
+      await User.findByIdAndUpdate(userId, {
+        pro: false
+      });
+
+      console.log("⌛ Subscription expired");
+      return res.sendStatus(200);
+
+    } catch (err) {
+      console.error("❌ Error handling expiry:", err);
+      return res.sendStatus(500);
+    }
+  }
+
+
+});
+
 // Middleware
 app.use(express.json()); // Parse JSON bodies
 app.use(cors(corsOptions)); // Enable CORS with config
 app.use(morgan("dev"));  // Logger
 
+
+app.get('/api/memory/files', userMiddleware, async (req, res) => {
+  try {
+    const files = await File.find({ user_id: req.user._id }).select("-status -mimetype -total_chunks -reason -user_id");
+    res.status(200).json(files);
+  } catch (error) {
+    // console.error("Error fetching files:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+})
+
 app.use("/api/users", UserRouter);
-app.use('/user/verify', userMiddleware);
 app.use("/api/process", BriefRouter);
 app.use("/api/contactus", ContactRouter);
 app.use("/api/payment", PaymentRouter);
@@ -48,23 +251,25 @@ app.use("/api/payment", PaymentRouter);
 
 // Root route
 app.get("/", async (req, res) => {
-  res.send("API is running...");
+  console.log("hi"); // MUST be 768
 });
 
-app.post("/webhook", async (req, res) => {
-  try {
-    const payload = req.body;
-    const user_id = payload.meta.custom_data.user_id;
-    console.log("Webhook received for user ID:", user_id);
-    const updateUser = await UserModel.updateOne({_id : user_id}, {$set : {pro : true}});
-    res.status(200).send("Ok");
-  
 
-  } catch (error) {
-    console.error("Webhook Error:", error);
-    res.status(400).send("Webhook handler failed");
-  }
-});
+
+// app.post("/webhook", async (req, res) => {
+//   try {
+//     const payload = req.body;
+//     const user_id = payload.meta.custom_data.user_id;
+//     console.log("Webhook received for user ID:", user_id);
+//     const updateUser = await User.updateOne({ _id: user_id }, { $set: { pro: true } });
+//     res.status(200).send("Ok");
+
+
+//   } catch (error) {
+//     console.error("Webhook Error:", error);
+//     res.status(400).send("Webhook handler failed");
+//   }
+// });
 
 // Connect to database
 connectDB();
