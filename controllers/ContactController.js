@@ -12,7 +12,7 @@ const contact = async (req, res) => {
         const contact = new ContactModel({ name, email, category, message });
         await contact.save();
 
-        res.status(201).json({ success: true, data: contact, message : "We received your request , we will connect with you , thanks for reaching out us" });
+        res.status(201).json({ success: true, data: contact, message: "We received your request , we will connect with you , thanks for reaching out us" });
     } catch (error) {
         console.error("Contact save error:", error);
         res.status(500).json({ error: "Server error" });

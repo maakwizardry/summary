@@ -234,7 +234,7 @@ app.use(morgan("dev"));  // Logger
 
 app.get('/api/memory/files', userMiddleware, async (req, res) => {
   try {
-    const files = await File.find({ user_id: req.user._id }).select("-status -mimetype -total_chunks -reason -user_id");
+    const files = await File.find({ user_id: req.user._id }).select("-mimetype -total_chunks -reason -user_id");
     res.status(200).json(files);
   } catch (error) {
     // console.error("Error fetching files:", error);

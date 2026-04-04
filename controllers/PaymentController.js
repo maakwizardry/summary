@@ -8,7 +8,7 @@ require('dotenv').config();
 const lsqyConfig = {
     API_KEY: process.env.LEMONSQUEEZY_API_KEY,
     URL: "https://api.lemonsqueezy.com/v1",
-    store_id: "221566",
+    store_id: process.env.LEMON_SQUEEZY_STORE_ID,
 
 }
 
@@ -85,7 +85,7 @@ const subscribtion = async (req, res) => {
                             }
                         },
                         product_options: {
-                            redirect_url: `http://localhost:5173/billing`,
+                            redirect_url: `https://www.getsummaryapp.com/billing`,
                             receipt_button_text: "Go to Dashboard"
                         }
                     },
