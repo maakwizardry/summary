@@ -291,7 +291,7 @@ processFiles = async (req, res) => {
 
 
         // ❌ STRICT VALIDATION
-        if (validChunks.length < MIN_REQUIRED_CHUNKS) {
+        if (validChunks.length === 0) {
           // await cloudinary.uploader.destroy(cloudResult.public_id);
           await File.updateOne(
             { _id: fileDoc._id },
