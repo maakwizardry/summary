@@ -59,6 +59,21 @@ const checkAndResetDailyUsage = async (userInfo) => {
   }
 };
 
+const ALLOWED_EXTENSIONS = ["pdf", "docx", "txt", "png", "jpg", "jpeg"];
+
+function validateFileType(file) {
+  const ext = file.originalname.split(".").pop().toLowerCase();
+
+  if (!ALLOWED_EXTENSIONS.includes(ext)) {
+    return {
+      valid: false,
+      reason: `Upload failed. Unsupported file type: .${ext}`
+    };
+  }
+
+  return { valid: true };
+}
+
 
 
 
@@ -105,6 +120,16 @@ processFiles = async (req, res) => {
 
     for (const file of files) {
       // await checkAndResetDailyUsage(user);
+      const validation = validateFileType(file);
+
+      if (!validation.valid) {
+        storedFiles.push({
+          filename: file.originalname,
+          status: "failed",
+          reason: validation.reason
+        });
+        continue;
+      }
 
       if (file.size > MAX_FILE_SIZE) {
         storedFiles.push({
@@ -291,7 +316,7 @@ processFiles = async (req, res) => {
 
 
         // ❌ STRICT VALIDATION
-        if (validChunks.length === 0) {
+        if (chunks.length === 0) {
           // await cloudinary.uploader.destroy(cloudResult.public_id);
           await File.updateOne(
             { _id: fileDoc._id },
