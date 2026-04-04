@@ -32,6 +32,13 @@ const FileSchema = new mongoose.Schema(
             type: String,
             default: "uploaded"
         },
+        message: {
+            type: String,
+        },
+        failed_chunks: {
+            type: Number,
+            default: 0
+        },
 
         // 📄 metadata
         mimetype: {

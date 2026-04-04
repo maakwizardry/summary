@@ -19,23 +19,22 @@ function hashText(text) {
 
 const limit = pLimit(5);
 
-function normalizeStructuredData(text) {
-  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+async function generateWithRetry(chunk, retries = 3) {
+  try {
+    return await llmService.generateEmbedding(chunk);
+  } catch (err) {
+    if (err.message.includes("429") && retries > 0) {
+      console.log("⏳ Rate limited, retrying...");
 
-  const result = [];
+      await new Promise(res => setTimeout(res, 15000)); // 15 sec
 
-  for (let i = 0; i < lines.length - 1; i++) {
-    if (!isNaN(lines[i + 1])) {
-      result.push(`${lines[i]}: ${lines[i + 1]}`);
-      i++;
-    } else {
-      result.push(lines[i]);
+      return generateWithRetry(chunk, retries - 1);
     }
+
+    console.error("❌ Failed chunk permanently:", err.message);
+    return null;
   }
-
-  return result.join("\n");
 }
-
 
 
 const checkAndResetDailyUsage = async (userInfo) => {
@@ -60,52 +59,33 @@ const checkAndResetDailyUsage = async (userInfo) => {
   }
 };
 
+const ALLOWED_EXTENSIONS = ["pdf", "docx", "txt", "png", "jpg", "jpeg"];
 
+function validateFileType(file) {
+  const ext = file.originalname.split(".").pop().toLowerCase();
 
+  if (!ALLOWED_EXTENSIONS.includes(ext)) {
+    return {
+      valid: false,
+      reason: `Upload failed. Unsupported file type: .${ext}`
+    };
+  }
 
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  timeout: 120000
-});
-
-
-
-// Helper function to detect file type category
-function getFileCategory(mimeType) {
-  if (mimeType.startsWith('image/')) return 'image';
-  if (mimeType.startsWith('video/')) return 'video';
-  if (mimeType.startsWith('audio/')) return 'audio';
-  if (mimeType.includes('pdf') || mimeType.includes('document') || mimeType.includes('text')) return 'document';
-  return 'unknown';
+  return { valid: true };
 }
 
 
-function uploadToCloudinary(buffer, filename) {
-  return new Promise((resolve, reject) => {
-    const stream = cloudinary.uploader.upload_stream(
-      {
-        folder: "briefme-documents",
-        resource_type: "raw", // IMPORTANT for PDFs/DOCX
-        public_id: filename.replace(/\.[^/.]+$/, ""), // remove extension
-      },
-      (error, result) => {
-        if (error) return reject(error);
-        resolve(result);
-      }
-    );
-
-    streamifier.createReadStream(buffer).pipe(stream);
-  });
-}
 
 
 const isProUser = async (user) => {
-  const userLimit = await Subscription.find({ userId: user._id, status: "active" });
+
+
+  const userLimit = await Subscription.findOne({ userId: user._id, status: "active" });
   if (!userLimit) return false;
+  console.log(userLimit)
 
   const expiry = userLimit?.currentPeriodEnd;
+  console.log(expiry && new Date(expiry) > new Date())
 
   return expiry && new Date(expiry) > new Date();
 };
@@ -124,15 +104,15 @@ function createBatches(array, size) {
 processFiles = async (req, res) => {
   try {
     const files = req.files;
+    const MAX_FILE_SIZE = 50 * 1024 * 1024;
     const user = req.user;
-    const fileCount = await File.countDocuments({ user_id: user._id });
     // return console.log(user_file_length);
     const MIN_REQUIRED_CHUNKS = 1;
 
     if (!files || files.length === 0) {
       return res.status(400).json({
         status: false,
-        error: "No files uploaded"
+        message: "No files were uploaded. Please select a file and try again."
       });
     }
 
@@ -140,8 +120,32 @@ processFiles = async (req, res) => {
 
     for (const file of files) {
       // await checkAndResetDailyUsage(user);
+      const validation = validateFileType(file);
 
-      if (!isProUser(user) && fileCount >= 5) {
+      if (!validation.valid) {
+        storedFiles.push({
+          filename: file.originalname,
+          status: "failed",
+          reason: validation.reason
+        });
+        continue;
+      }
+
+      if (file.size > MAX_FILE_SIZE) {
+        storedFiles.push({
+          filename: file.originalname,
+          status: "failed",
+          reason: `Upload failed for ${file.originalname}. Maximum file size allowed is 50MB.`,
+        });
+        continue;
+      }
+
+      const [isPro, fileCount] = await Promise.all([
+        isProUser(user),
+        File.countDocuments({ user_id: user._id })
+      ]);
+
+      if (!isPro && fileCount >= 5) {
         return res.status(403).json({
           message: "You’ve reached the 5-file storage limit. Upgrade to Pro and enjoy expanded memory space.",
           type: "limit"
@@ -163,6 +167,8 @@ processFiles = async (req, res) => {
           // cloudinary_url: cloudResult.secure_url,
           // cloudinary_id: cloudResult.public_id,
           status: "processing",
+          message: "",
+          failed_chunks: 0,
           mimetype: file.mimetype,
           size: file.size,
           total_chunks: 0
@@ -184,7 +190,13 @@ processFiles = async (req, res) => {
 
         if (!extractedText || !extractedText.trim()) {
           // await cloudinary.uploader.destroy(cloudResult.public_id);
-          await File.deleteOne({ _id: fileDoc._id });
+          await File.updateOne(
+            { _id: fileDoc._id },
+            {
+              status: "failed",
+              message: "No readable text found"
+            }
+          );
 
           storedFiles.push({
             filename: file.originalname,
@@ -211,7 +223,6 @@ processFiles = async (req, res) => {
         //   chunks.map((chunk, i) =>
         //     limit(async () => {
         //       try {
-        //         const hash = hashText(chunk);
 
         //         // 🔍 check duplicate
         //         const exists = await Chunk.findOne({
@@ -249,10 +260,13 @@ processFiles = async (req, res) => {
         //   )
         // );
 
-        const BATCH_SIZE = 100;
+        const BATCH_SIZE = 10;
         const batches = createBatches(chunks, BATCH_SIZE);
+        let failedChunks = 0;
+
 
         const chunkDocs = [];
+
 
         for (let b = 0; b < batches.length; b++) {
           const batch = batches[b];
@@ -260,14 +274,19 @@ processFiles = async (req, res) => {
           try {
             // ⚡ Generate embeddings for full batch
             const embeddings = await Promise.all(
-              batch.map(chunk => llmService.generateEmbedding(chunk))
+              batch.map(chunk =>
+                limit(() => generateWithRetry(chunk))
+              )
             );
 
             for (let i = 0; i < batch.length; i++) {
               const chunk = batch[i];
               const embedding = embeddings[i];
 
-              if (!embedding || !embedding.length) continue;
+              if (!embedding || !embedding.length) {
+                failedChunks++;
+                continue
+              };
 
               const hash = hashText(chunk);
 
@@ -288,7 +307,7 @@ processFiles = async (req, res) => {
             }
 
           } catch (err) {
-            console.error("Batch error:", b, err);
+            console.error(`❌ Batch ${b} failed completely:`, err.message);
           }
         }
 
@@ -297,9 +316,16 @@ processFiles = async (req, res) => {
 
 
         // ❌ STRICT VALIDATION
-        if (chunks.length < MIN_REQUIRED_CHUNKS) {
+        if (chunks.length === 0) {
           // await cloudinary.uploader.destroy(cloudResult.public_id);
-          await File.deleteOne({ _id: fileDoc._id });
+          await File.updateOne(
+            { _id: fileDoc._id },
+            {
+              status: "failed",
+              message: "Unable to extract the text from the file, please try with some other file"
+            }
+          );
+
 
           storedFiles.push({
             filename: file.originalname,
@@ -317,7 +343,11 @@ processFiles = async (req, res) => {
         await File.updateOne(
           { _id: fileDoc._id },
           {
-            status: "indexed",
+            status: "queryable",
+            failed_chunks: failedChunks,
+            message: failedChunks > 0
+              ? `${failedChunks} parts of this file could not be processed`
+              : "File is ready to be queried",
             total_chunks: validChunks.length
           }
         );
@@ -325,12 +355,28 @@ processFiles = async (req, res) => {
         storedFiles.push({
           file_id: fileDoc._id,
           filename: file.originalname,
-          total_chunks: chunkDocs.length,
-          status: "indexed"
+          total_chunks: validChunks.length,
+          status: "queryable",
+          message: failedChunks > 0
+            ? `${failedChunks} parts of this file could not be processed`
+            : "File is fully processed"
+
+          ,
+          reason: failedChunks > 0
+            ? `${failedChunks} parts of this file could not be processed`
+            : "File is fully processed"
         });
 
       } catch (err) {
         console.error("File processing failed:", err);
+
+        await File.updateOne(
+          { _id: fileDoc._id },
+          {
+            status: "failed",
+            message: "File processing error. please try again later."
+          }
+        );
 
         // if (cloudResult?.public_id) {
         //   await cloudinary.uploader.destroy(cloudResult.public_id);
@@ -339,7 +385,7 @@ processFiles = async (req, res) => {
         storedFiles.push({
           filename: file.originalname,
           status: "failed",
-          reason: "Processing error"
+          reason: "File processing error. please try again later."
         });
       }
     }
@@ -366,7 +412,6 @@ processFiles = async (req, res) => {
 
 const respondHandler = async (query, user, selectedFiles = []) => {
 
-  console.log("Executed");
 
 
   // step 1  : intend detection 
@@ -378,7 +423,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
   const questionEmbedding = await llmService.generateEmbedding(query);     // step 1 : embed the query   i tested here for llmService embeddings are working
   if (!questionEmbedding) {
     return res.json({
-      answer: "Failed to process your query.",
+      answer: "Your query could not be processed at this time. Please try again.",
       references: []
     });
   }
@@ -420,12 +465,11 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     }
   ]);
 
-  console.log(chunks)
 
 
   if (!chunks.length) {
     return JSON.stringify({
-      answer: "I couldn’t find relevant information in your documents.",
+      answer: "I couldn’t find any relevant information in your documents.",
       references: []
     });
   }
@@ -448,7 +492,6 @@ const respondHandler = async (query, user, selectedFiles = []) => {
     .join("\n\n");
 
 
-  console.log(context);
   // const chunks = await Chunk.find(queryFilter);
   // if (chunks.length > 0) {
 
@@ -530,16 +573,16 @@ TASK:
 Answer the user's request using ONLY the provided CONTEXT.
 
 CORE RULES:
+- You must always try to respond with important things in a context with respect to query given to you.
+- Always look for important points in the given context. Firstly understand the query meaning deeply and pick the important and highly matched context and explain to the user.
 - The CONTEXT is your only source.
 - Do NOT use external knowledge.
 - Do NOT copy raw text directly.
-- Understand and explain the data clearly.
+- Understand and explain the data clearly in a clean structured way
 - You are NOT a general AI assistant.
 - You are ONLY a memory retrieval system.
-- NEVER say:
-  "I don't have information"
-  "I don’t know"
-  "No information about this person/thing/place..etc"
+- Answer based on only the context at any cost. ( you must follow very strictly ).
+- You should not go outside of the context even if you are foreced to be. ( you must follow very strictly ).
 
 DATA HANDLING:
 - If the content is tabular, convert it into a clear readable paragraph.
@@ -568,7 +611,7 @@ STRICT OUTPUT RULES (MANDATORY):
    - Use any markdown
 
   6. If no relevant information:
-  { "answer": "I’m unable to find relevant information in the uploaded documents.", "references": [] }
+  { "answer": "I couldn’t find any relevant information in your documents.", "references": [] }
 
 FINAL CHECK BEFORE RETURN:
   - Single object ? ✅
@@ -653,7 +696,7 @@ async function summarizeFilesByNames(query, fileId, user) {
 
   if (!files.length) {
     return JSON.stringify({
-      answer: "Please specify valid files."
+      answer: "Looks like you are referencing a file. Please use @filename to mention a file."
     });
   }
 
@@ -688,7 +731,7 @@ async function summarizeFilesByNames(query, fileId, user) {
 
 
   if (!combinedText.trim()) {
-    return JSON.stringify({ answer: "No meaningful content found in the document . looks like you have no data" })
+    return JSON.stringify({ answer: "No usable content was detected in the document. Please ensure the file contains readable information." })
   }
   const prompt = `
   You are BriefMe AI, a smart memory assistant.
@@ -697,10 +740,14 @@ TASK:
 Answer the user's request using ONLY the provided CONTEXT.
 
 CORE RULES:
+- You must always try to respond with important things in a context with respect to query given to you.
+- Always look for important points in the given context. Firstly understand the query meaning deeply and pick the important and highly matched context and explain to the user.
 - The CONTEXT is your only source.
 - Do NOT use external knowledge.
 - Do NOT copy raw text directly.
-- Understand and explain the data clearly.
+- Understand and explain the data clearly in a clean structured way.
+- Answer based on only the context at any cost. ( you must follow very strictly ).
+- You should not go outside of the context even if you are foreced to be. ( you must follow very strictly ).
 
 DATA HANDLING:
 - If the content is tabular, convert it into a clear readable paragraph.
@@ -729,7 +776,7 @@ STRICT OUTPUT RULES (MANDATORY):
    - Use any markdown
 
   6. If no relevant information:
-  { "answer": "I’m unable to find relevant information in the uploaded documents.", "references": [] }
+  { "answer": "I couldn’t find any relevant information in your documents.", "references": [] }
 
 FINAL CHECK BEFORE RETURN:
   - Single object ? ✅
@@ -747,7 +794,6 @@ ${query}
   `
 
 
-  console.log(prompt);
 
   return await llmService.generateText(prompt);
 
@@ -821,6 +867,7 @@ Rules:
    - OR casual conversation
 
 
+
 GREETING HANDLING (HIGH PRIORITY):
 
 GENERAL QUESTION HANDLING:
@@ -892,7 +939,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
 
   if (!selectedFiles || selectedFiles.length === 0) {
     return JSON.stringify({
-      answer: "Please select at least one file to continue",
+      answer: "It seems you are referring to a file. Please specify it using @filename.",
       references: []
     });
   }
@@ -908,7 +955,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
 
   if (!questionEmbedding) {
     return JSON.stringify({
-      answer: "There was a problem generating response, please try again.",
+      answer: "There was a problem while generating the response, please try again.",
       references: []
     });
   }
@@ -919,7 +966,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
       $vectorSearch: {
         queryVector: questionEmbedding,
         path: "embedding",
-        numCandidates: 80,
+        numCandidates: 500,
         limit: 5,
         index: "vector_index",
         filter: {
@@ -936,11 +983,10 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
     }
   ]);
 
-  console.log(chunks);
 
   if (!chunks.length) {
     return JSON.stringify({
-      answer: "The selected files do not mention this topic.",
+      answer: "The selected files do not contain information on this topic.",
       references: []
     });
   }
@@ -961,7 +1007,6 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
     .sort((a, b) => b.score - a.score) // highest score first
     .slice(0, 5); // top 3
 
-  console.log(topChunks);
 
   // 🔥 4. Build context (SMALL)
   const context = topChunks
@@ -979,10 +1024,14 @@ TASK:
 Answer the user's request using ONLY the provided CONTEXT.
 
 CORE RULES:
+- You must always try to respond with important things in a context with respect to query given to you.
+- Always look for important points in the given context. Firstly understand the query meaning deeply and pick the important and highly matched context and explain to the user.
 - The CONTEXT is your only source.
 - Do NOT use external knowledge.
 - Do NOT copy raw text directly.
-- Understand and explain the data clearly.
+- Understand and explain the data clearly in a clean structured way.
+- Answer based on only the context at any cost. ( you must follow very strictly ).
+- You should not go outside of the context even if you are foreced to be. ( you must follow very strictly ).
 
 DATA HANDLING:
 - If the content is tabular, convert it into a clear readable paragraph.
@@ -1011,7 +1060,7 @@ STRICT OUTPUT RULES (MANDATORY):
    - Use any markdown
 
   6. If no relevant information:
-  { "answer": "I’m unable to find relevant information in the uploaded documents.", "references": [] }
+  { "answer": "I couldn’t find any relevant information in your documents.", "references": [] }
 
 FINAL CHECK BEFORE RETURN:
   - Single object ? ✅
@@ -1045,7 +1094,7 @@ const respond = async (req, res) => {
   const userObj = await User.findById(user._id);
   if (!userObj.pro && userObj.dailyUsage.chatCount >= 7) {
     return res.status(403).json({
-      message: "Daily chat limit reached, upgrade to pro version and enjoy unintrepted services",
+      message: "You have reached your daily chat limit. Please upgrade to the Premium version to continue.",
       type: "limit"
     });
   }
@@ -1055,7 +1104,7 @@ const respond = async (req, res) => {
   if (!query) {
     return res.status(400).json({
       status: false,
-      error: "Question is required"
+      message: "It looks like your message is empty. Please enter a question."
     });
   }
 
