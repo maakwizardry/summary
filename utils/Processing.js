@@ -1,8 +1,10 @@
-const pdf = require("pdf-parse");
 const mammoth = require("mammoth");
 // ✅ PDF processing (layout-aware)
 const JSZip = require("jszip");
+const sharp = require("sharp");
+const path = require("path");
 const pdfjsLib = require("pdfjs-dist/legacy/build/pdf");
+pdfjsLib.verbosity = pdfjsLib.VerbosityLevel.ERRORS;
 
 // ✅ Canvas (needed for rendering PDF pages)
 const { createCanvas } = require("canvas");
@@ -17,7 +19,11 @@ async function extractText(file) {
     // ✅ PDF
     if (ext === "pdf") {
         const loadingTask = pdfjsLib.getDocument({
-            data: new Uint8Array(file.buffer)
+            data: new Uint8Array(file.buffer),
+            standardFontDataUrl: path.join(
+                __dirname,
+                "node_modules/pdfjs-dist/standard_fonts/"
+            )
         });
 
         const pdf = await loadingTask.promise;
@@ -25,99 +31,64 @@ async function extractText(file) {
 
         for (let i = 1; i <= pdf.numPages; i++) {
             const page = await pdf.getPage(i);
+
+            // =========================
+            // 🔥 1. EXTRACT TEXT LAYER
+            // =========================
             const textContent = await page.getTextContent();
+            const textItems = textContent.items;
+
+            const textLayer = textItems.map(i => i.str).join(" ").trim();
 
             // =========================
-            // 🔥 1. GROUP BY ROW (SMART)
+            // 🔥 2. DETECT IMAGE SIGNAL
             // =========================
-            const rows = [];
+            const operatorList = await page.getOperatorList();
 
-            textContent.items.forEach(item => {
-                const y = item.transform[5];
-                const x = item.transform[4];
+            const hasImages = operatorList.fnArray.some(fn =>
+                fn === pdfjsLib.OPS.paintImageXObject ||
+                fn === pdfjsLib.OPS.paintJpegXObject
+            );
 
-                // tolerance-based grouping (IMPORTANT)
-                let row = rows.find(r => Math.abs(r.y - y) < 6);
-
-                if (!row) {
-                    row = { y, items: [] };
-                    rows.push(row);
-                }
-
-                row.items.push({ text: item.str, x });
-            });
+            const textDensity = textItems.length;
 
             // =========================
-            // 🔥 2. SORT + BUILD LINES
+            // 🔥 3. DECIDE TYPE
             // =========================
-            const sortedRows = rows
-                .sort((a, b) => b.y - a.y)
-                .map(row => {
-                    const items = row.items.sort((a, b) => a.x - b.x);
+            const isTextHeavy = textDensity > 30;
+            const isScanned = textDensity < 10 && hasImages;
+            const isHybrid = hasImages && textDensity >= 10;
 
-                    let line = "";
-                    let lastX = 0;
-
-                    items.forEach(item => {
-                        const gap = item.x - lastX;
-
-                        // preserve spacing (IMPORTANT)
-                        if (gap > 50) line += "    ";
-                        else line += " ";
-
-                        line += item.text;
-                        lastX = item.x;
-                    });
-
-                    return line.trim();
-                });
+            let finalPageText = "";
 
             // =========================
-            // 🔥 3. MERGE SPLIT ROWS
+            // 🔥 4. TEXT HEAVY → USE TEXT
             // =========================
-            const mergedRows = [];
-
-            for (let i = 0; i < sortedRows.length; i++) {
-                const current = sortedRows[i];
-                const next = sortedRows[i + 1];
-
-                // short line → likely label → merge
-                if (next && current.split(" ").length <= 2) {
-                    mergedRows.push(current + " " + next);
-                    i++; // skip next
-                } else {
-                    mergedRows.push(current);
-                }
+            if (isTextHeavy) {
+                finalPageText = textLayer;
             }
 
-            let pageText = mergedRows.join("\n");
-
-            fullText += pageText + "\n";
-
             // =========================
-            // 🔥 4. OCR FALLBACK
+            // 🔥 5. SCANNED → USE OCR
             // =========================
-            if (pageText.trim().length < 50) {
-                const viewport = page.getViewport({ scale: 2 });
-
-                const canvas = createCanvas(viewport.width, viewport.height);
-                const context = canvas.getContext("2d");
-
-                await page.render({
-                    canvasContext: context,
-                    viewport
-                }).promise;
-
-                const imageBuffer = canvas.toBuffer();
-
-                const { data } = await Tesseract.recognize(imageBuffer, "eng");
-
-                fullText += data.text + "\n";
+            else if (isScanned) {
+                const ocrText = await runOCR(page);
+                finalPageText = ocrText;
             }
+
+            // =========================
+            // 🔥 6. HYBRID → MERGE BOTH
+            // =========================
+            else if (isHybrid) {
+                const ocrText = await runOCR(page);
+
+                finalPageText = mergeHybrid(textLayer, ocrText);
+            }
+
+            fullText += finalPageText + "\n\n";
         }
 
-        console.log(fullText)
-        return fullText; // ✅ FINAL OUTPUT
+        return cleanFinal(fullText);
     }
     // ✅ DOCX
     if (ext === "docx") {
@@ -133,8 +104,8 @@ async function extractText(file) {
         // =========================
         html = html
             .replace(/<\/tr>/g, "\n")
-            .replace(/<\/td>/g, "    ")   // spacing like PDF columns
-            .replace(/<\/th>/g, "    ")
+            .replace(/<\/td>/g, " ")
+            .replace(/<\/th>/g, " ")
             .replace(/<\/p>/g, "\n");
 
         // remove tags
@@ -143,7 +114,7 @@ async function extractText(file) {
         // clean spacing
         text = text
             .replace(/\r/g, "")
-            .replace(/ {2,}/g, "    ")
+            .replace(/ {2,}/g, " ")
             .replace(/\n+/g, "\n")
             .trim();
 
@@ -157,10 +128,13 @@ async function extractText(file) {
             if (fileName.startsWith("word/media/")) {
                 const imageBuffer = await zip.files[fileName].async("nodebuffer");
 
-                const { data } = await Tesseract.recognize(imageBuffer, "eng");
+                const { data } = await Tesseract.recognize(imageBuffer, "eng+tam");
+                const cleaned = data.text.replace(/[^a-zA-Z0-9:/.,()%\- ]/g, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
 
-                if (data.text.trim().length > 5) {
-                    imageTexts.push(data.text.trim());
+                if (cleaned.length > 5) {
+                    imageTexts.push(cleaned);
                 }
             }
         }
@@ -177,7 +151,8 @@ async function extractText(file) {
         // =========================
         // 🔥 5. SAFE LINE MERGING (FIXED)
         // =========================
-        const lines = combined.split("\n");
+        const lines = combined.split("\n").map(l => l.trim())
+            .filter(l => l.length > 0);
         const finalLines = [];
 
         for (let i = 0; i < lines.length; i++) {
@@ -187,7 +162,7 @@ async function extractText(file) {
             // 🔥 safer merging (no data loss)
             if (
                 next &&
-                current.length <= 2 &&
+                current.length <= 3 &&
                 !/\d/.test(current) &&
                 /\d/.test(next)
             ) {
@@ -198,7 +173,16 @@ async function extractText(file) {
             }
         }
 
-        return finalLines.join("\n");
+        let finalText = finalLines.join("\n");
+
+        finalText = finalText
+            .replace(/[^\x00-\x7F]/g, " ")
+            .replace(/\s+/g, " ")
+            .replace(/\n+/g, "\n")
+            .trim();
+
+        return finalText;
+
 
 
 
@@ -277,31 +261,38 @@ function normalizeStructuredData(text) {
     return result.join("\n");
 }
 
-function chunkText(text, maxChars = 500) {
+function chunkText(text, maxChars = 600, overlapSentences = 1) {
+    if (!text) return [];
 
-    const lines = text
-        .replace(/\r/g, "")
-        .split("\n")
-        .map(l => l.trim())
-        .filter(Boolean);
+    const clean = text.replace(/\s+/g, " ").trim();
+
+    const sentences = clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
 
     const chunks = [];
-    let current = "";
+    let currentChunk = [];
 
-    for (const line of lines) {
-        if ((current + " " + line).length <= maxChars) {
-            current += " " + line;
+    for (let i = 0; i < sentences.length; i++) {
+        const sentence = sentences[i];
+
+        const combined = [...currentChunk, sentence].join(" ");
+
+        if (combined.length <= maxChars) {
+            currentChunk.push(sentence);
         } else {
-            chunks.push(current.trim());
-            current = line;
+            chunks.push(currentChunk.join(" ").trim());
+
+            // ✅ overlap by sentence (SAFE)
+            currentChunk = currentChunk.slice(-overlapSentences);
+            currentChunk.push(sentence);
         }
     }
 
-    if (current) chunks.push(current.trim());
+    if (currentChunk.length > 0) {
+        chunks.push(currentChunk.join(" ").trim());
+    }
 
     return chunks;
 }
-
 async function embedText(text) {
     if (!text || !text.trim()) return null;
 

@@ -11,7 +11,7 @@ const connectDB = require("./config/db");
 const userMiddleware = require("./middleware/userMiddleware");
 const User = require('./models/User');
 const crypto = require("crypto");
-const mongoose = require("mongoose");
+const removeUnverifiedUsers = require("./cron/deleteUsers");
 const File = require('./models/File');
 const Subscription = require('./models/Subscription');
 
@@ -126,7 +126,11 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         },
         { upsert: true, new: true }
       );
-      console.log(response);
+      const user = await User.findByIdAndUpdate(userId, {
+        pro: true,
+        SubscriptionStatus: attr.status,
+      });
+      console.log(user);
       console.log("✅ Subscription saved/updated");
       return res.sendStatus(200);
     }
@@ -182,7 +186,8 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
 
       // ✅ KEEP USER AS PRO (IMPORTANT)
       await User.findByIdAndUpdate(userId, {
-        pro: true
+        pro: true,
+        SubscriptionStatus: attr.status,
       });
 
       console.log("❌ Subscription cancelled (but still active until expiry)");
@@ -211,7 +216,8 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
 
       // ✅ 2. Remove PRO access from user
       await User.findByIdAndUpdate(userId, {
-        pro: false
+        pro: false,
+        SubscriptionStatus: attr.status,
       });
 
       console.log("⌛ Subscription expired");
@@ -230,6 +236,11 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
 app.use(express.json()); // Parse JSON bodies
 app.use(cors(corsOptions)); // Enable CORS with config
 app.use(morgan("dev"));  // Logger
+app.use("/api/users", UserRouter);
+app.use("/api/process", BriefRouter);
+app.use("/api/contact", ContactRouter);
+app.use("/api/payment", PaymentRouter);
+
 
 
 app.get('/api/memory/files', userMiddleware, async (req, res) => {
@@ -242,34 +253,14 @@ app.get('/api/memory/files', userMiddleware, async (req, res) => {
   }
 })
 
-app.use("/api/users", UserRouter);
-app.use("/api/process", BriefRouter);
-app.use("/api/contactus", ContactRouter);
-app.use("/api/payment", PaymentRouter);
 
 
 
 // Root route
 app.get("/", async (req, res) => {
-  console.log("hi"); // MUST be 768
+  console.log(""); // MUST be 768
 });
 
-
-
-// app.post("/webhook", async (req, res) => {
-//   try {
-//     const payload = req.body;
-//     const user_id = payload.meta.custom_data.user_id;
-//     console.log("Webhook received for user ID:", user_id);
-//     const updateUser = await User.updateOne({ _id: user_id }, { $set: { pro: true } });
-//     res.status(200).send("Ok");
-
-
-//   } catch (error) {
-//     console.error("Webhook Error:", error);
-//     res.status(400).send("Webhook handler failed");
-//   }
-// });
 
 // Connect to database
 connectDB();

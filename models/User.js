@@ -56,11 +56,21 @@ const userSchema = new mongoose.Schema({
     },
 
     // 🔐 AUTH / VERIFICATION
-    otp: String,
+    emailVerifyToken: String,
+    emailVerifyExpires: Date,
 
     isVerified: {
         type: Boolean,
         default: false
+    },
+
+    resetPasswordToken: {
+        type: String,
+        default: null
+    },
+    resetPasswordExpires: {
+        type: Date,
+        default: null
     },
 
     // ⚡ FEATURE LIMIT CONTROL (for free users)
@@ -68,6 +78,12 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 0
     }
+    ,
+    SubscriptionStatus: {
+        type: String,
+        enum: ["active", "cancelled", "expired", "past_due", null],
+        default: null
+    },
 
 }, {
     timestamps: true

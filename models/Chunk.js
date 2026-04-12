@@ -54,6 +54,6 @@ const ChunkSchema = new mongoose.Schema(
 );
 
 // Helpful compound index
-ChunkSchema.index({ file_id: 1, chunk_index: 1 });
+ChunkSchema.index({ user_id: 1, text: "text" });
 
 module.exports = mongoose.model("Chunk", ChunkSchema);
