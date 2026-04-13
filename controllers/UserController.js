@@ -95,7 +95,13 @@ const login = async (req, res) => {
     }
 
     if (!user.isVerified) {
-      return res.status(403).json({ message: "Please verify your email to continue", status: "unverified" });
+
+      const identityToken = jwt.sign(
+        { user_id: user._id },
+        process.env.JWT_SECRET,
+        { expiresIn: "1d" }
+      );
+      return res.status(403).json({ message: "Please verify your email to continue", status: "unverified", token: identityToken });
     }
 
 
@@ -137,7 +143,7 @@ const verifyUser = async (req, res) => {
     user.emailVerifyToken = null;
     user.emailVerifyExpires = null;
     await user.save();
-    const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.VITE_FRONTEND_URL}/summary` });
+    const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.FRONTEND_URL}/summary` });
     if (status) {
       console.log("Welcome email sent successfully");
     }
@@ -267,7 +273,7 @@ const getStatus = async (req, res) => {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
     } catch (err) {
       return res.status(401).json({
-        message: "Invalid or expired token"
+        message: "Invalid token"
       });
     }
 

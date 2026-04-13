@@ -76,8 +76,13 @@ const welcomeTemplate = ({ name = "User", url }) => {
                   <table width="100%">
                     <tr>
                       <td style="font-size:14px;color:#555;line-height:1.6;padding-bottom:18px;">
-                        We're glad you're here.<br/><br/>
-                        SummaryAI helps you understand documents faster and more efficiently.
+                        So glad you're here.<br/><br/>
+                        You just signed up — and we want to make sure your first few minutes with Summary AI feel easy, useful, and maybe even a little delightful.
+                      </td>
+                    </tr>
+                    <tr>
+                      <td style="font-size:14px;color:#555;line-height:1.6;padding-bottom:18px;">
+                        The idea behind Summary AI is simple: you shouldn't have to spend hours on a document just to understand what's inside it. Upload it, and we'll help you get to the good stuff — fast.
                       </td>
                     </tr>
                   </table>
@@ -86,10 +91,10 @@ const welcomeTemplate = ({ name = "User", url }) => {
                   <table width="100%">
                     <tr>
                       <td style="font-size:14px;color:#333;line-height:1.8;padding-bottom:22px;">
-                        <strong>Get started in seconds:</strong><br/><br/>
-                        • Upload your document<br/>
-                        • Get a clear summary<br/>
-                        • Ask questions and explore
+                        <strong>Here's how to get started:</strong><br/><br/>
+                        <strong>1.</strong> Upload your document — PDF, Word file, image, or audio. Whatever you've got.<br/>
+                        <strong>2.</strong> Get an instant summary — key points, clearly laid out, in seconds.<br/>
+                        <strong>3.</strong> Ask anything — dig deeper by chatting with your document directly.
                       </td>
                     </tr>
                   </table>
@@ -107,7 +112,7 @@ const welcomeTemplate = ({ name = "User", url }) => {
                                   font-size:14px;
                                   font-weight:600;
                                   display:inline-block;">
-                          Upload your first document
+                          Upload your first document &rarr;
                         </a>
                       </td>
                     </tr>
@@ -116,9 +121,9 @@ const welcomeTemplate = ({ name = "User", url }) => {
                   <!-- Tip -->
                   <table width="100%">
                     <tr>
-                      <td style="font-size:12px;color:#666;line-height:1.5;padding-bottom:16px;">
-                        <strong>Tip:</strong> Try asking —  
-                        <i>"What are the key takeaways?"</i>
+                      <td style="font-size:14px;color:#555;line-height:1.6;padding-bottom:16px;">
+                        <strong>A little nudge:</strong> After uploading, try asking — <i>"What are the key takeaways?"</i> or <i>"Explain this simply."</i> That's where Summary AI really shines.<br/><br/>
+                        And if anything ever feels unclear, or you just want to share what you think — hit reply. I read every message personally.
                       </td>
                     </tr>
                   </table>
@@ -126,9 +131,10 @@ const welcomeTemplate = ({ name = "User", url }) => {
                   <!-- Footer -->
                   <table width="100%">
                     <tr>
-                      <td style="font-size:13px;color:#444;padding-top:10px;">
-                        Welcome aboard 🚀<br/>
-                        <strong>SummaryAI Team</strong>
+                      <td style="font-size:14px;color:#444;line-height:1.6;padding-top:10px;">
+                        Welcome to Summary AI. Let's make reading feel lighter.<br/><br/>
+                        Regards,<br/>
+                        <strong>Summary AI Team</strong>
                       </td>
                     </tr>
                   </table>
