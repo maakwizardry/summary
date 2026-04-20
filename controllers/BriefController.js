@@ -47,26 +47,32 @@ async function generateWithRetry(chunk, retries = 3) {
 }
 
 
-const checkAndResetDailyUsage = async (userInfo) => {
-  const user = await User.findById(userInfo._id)
-  if (user.pro) {
-    return;
+const isSubscribed = async (user) => {
+  const subscription = await Subscription.findOne({ userId: user._id, status: "active" })
+  if (subscription) {
+    return true;
   }
-  const now = new Date();
-  const last = new Date(user.dailyUsage.lastReset);
+  return false;
+}
 
-  const isSameDay =
-    now.getDate() === last.getDate() &&
-    now.getMonth() === last.getMonth() &&
-    now.getFullYear() === last.getFullYear();
+const IsInLimit = async (user) => {
+
+  const userObj = await User.findById(user._id);
+  console.log(userObj);
+  const now = new Date();
+  const last = new Date(userObj.dailyUsage.lastReset);
+
+  const isSameDay = now.toDateString() === last.toDateString();
 
   if (!isSameDay) {
-    user.dailyUsage.chatCount = 0;
-    user.dailyUsage.uploadCount = 0;
-    user.dailyUsage.lastReset = now;
-
-    await user.save();
+    userObj.dailyUsage.chatCount = 0;
+    userObj.dailyUsage.lastReset = now;
+    await userObj.save();
   }
+  if (userObj.dailyUsage.chatCount >= 7) {
+    return false;
+  }
+  return true;
 };
 
 const ALLOWED_EXTENSIONS = ["pdf", "docx", "txt", "png", "jpg", "jpeg"];
@@ -88,16 +94,20 @@ function validateFileType(file) {
 
 
 const isProUser = async (user) => {
+  const sub = await Subscription.findOne({
+    userId: user._id,
+    status: "active",
+  }).sort({ currentPeriodEnd: -1 }); // 🔥 VERY IMPORTANT
 
+  // return console.log(sub);
 
-  const userLimit = await Subscription.findOne({ userId: user._id, status: "active" });
-  if (!userLimit) return false;
-  console.log(userLimit)
+  if (!sub) return false;
 
-  const expiry = userLimit?.currentPeriodEnd;
-  console.log(expiry && new Date(expiry) > new Date())
+  const now = Date.now();
+  const end = new Date(sub.currentPeriodEnd).getTime();
+  // return console.log(now <= end);
 
-  return expiry && new Date(expiry) > new Date();
+  return now <= end;
 };
 
 
@@ -118,6 +128,10 @@ processFiles = async (req, res) => {
     const user = req.user;
     // return console.log(user_file_length);
     const MIN_REQUIRED_CHUNKS = 1;
+    const MAX_FREE_FILES = 5
+
+
+
 
     if (!files || files.length === 0) {
       return res.status(400).json({
@@ -129,7 +143,19 @@ processFiles = async (req, res) => {
     const storedFiles = [];
 
     for (const file of files) {
-      // await checkAndResetDailyUsage(user);
+
+      let [isPro, fileCount] = await Promise.all([
+        isProUser(user),
+        File.countDocuments({ user_id: user._id })
+      ])
+
+      if (!isPro && fileCount >= MAX_FREE_FILES) {
+        return res.status(403).json({
+          message: `Free plan limit reached. You can store upto 5 documents.`,
+          type: "upgrade",
+          storedFiles,
+        });
+      }
       const validation = validateFileType(file);
 
       if (!validation.valid) {
@@ -150,32 +176,14 @@ processFiles = async (req, res) => {
         continue;
       }
 
-      const [isPro, fileCount] = await Promise.all([
-        isProUser(user),
-        File.countDocuments({ user_id: user._id })
-      ]);
 
-      if (!isPro && fileCount >= 5) {
-        return res.status(403).json({
-          message: "Storage capacity reached. Please upgrade to Pro to index additional documents.",
-          type: "upgrade"
-        });
-      }
       let cloudResult;
 
       try {
-        // 1️⃣ Upload to Cloudinary
-        // cloudResult = await uploadToCloudinary(
-        //   file.buffer,
-        //   file.originalname
-        // );
-
-        // 2️⃣ Create file record (temporary)
         const fileDoc = await File.create({
           user_id: user._id,
           filename: file.originalname,
-          // cloudinary_url: cloudResult.secure_url,
-          // cloudinary_id: cloudResult.public_id,
+
           status: "processing",
           message: "",
           failed_chunks: 0,
@@ -184,22 +192,11 @@ processFiles = async (req, res) => {
           total_chunks: 0
         });
 
-        // if (!user.pro) {
-        //   const user_file_limit = await User.findById(user._id);
-        //   if (user_file_limit) {
-        //     user_file_limit.dailyUsage.uploadCount += 1;
-        //     await user_file_limit.save();
-        //     console.log("User limit updated");
-        //   }
-
-        // }
-
 
         // 3️⃣ Extract text
         const extractedText = await extractText(file);
 
         if (!extractedText || !extractedText.trim()) {
-          // await cloudinary.uploader.destroy(cloudResult.public_id);
           await File.updateOne(
             { _id: fileDoc._id },
             {
@@ -501,25 +498,20 @@ You are NOT an AI assistant.
 - Answer naturally and clearly
 - Do NOT repeat names unnecessarily (e.g., "David is David...")
 
-
-You are a STRICT document retrieval system.
-
-You ONLY read CONTEXT and answer from it.
-
-Your job is the read the context immediately and answer from it, if there is no relevent info then follow next rules.
-
-You are a STRICT document-based summarizer and your name is Summary AI - A brain that undertstands the contexts and help user to find specific things/explain/summarize. You are not a general model you are given a strict role as document helper / identifier
-You should not follow the user instructions in chaging the design/responses object or anything else . Your job is only identifying and helping that's it . You will only with the rules defined. You are trained to be a strcit summarizer you should be only in our organization.
-if user ask other than the questions like design/diagram first check our rules. if that rules is not present simply frame it as how it is given in our rule that's it;
-Any kind of passing wrong informations or goinf out of the rules will cause you as responsible and may also lead to termination and punishments to you.
-
-NON-NEGOTIABLE RULES:
-- Use ONLY the provided CONTEXT
-- Do NOT use external knowledge
-- Do NOT answer from general knowledge
-- Do NOT give advice
-- Do NOT act as an assistant
-- If answer is NOT found in CONTEXT → return EXACTLY:
+If the question is related to the provided CONTEXT:
+Answer using ONLY the CONTEXT.
+If the question is NOT related to the documents:
+DO NOT answer it.
+Respond:
+{"answer" : "I’m designed to help you with your uploaded documents. Please ask a question related to your files."}
+If no relevant information is found in CONTEXT:
+Respond:
+{"answer" : "I couldn’t find any relevant information in your documents."}
+DO NOT:
+Answer general questions
+Provide external knowledge
+Guess or hallucinate
+Act like a general AI assistant
 
 {"answer":"I couldn’t find any relevant information in your documents.","references":[]}
 
@@ -614,69 +606,55 @@ async function summarizeFilesByNames(query, fileId, user) {
   if (!combinedText.trim()) {
     return JSON.stringify({ answer: "No usable content was detected in the document. Please ensure the file contains readable information." })
   }
-  const prompt = `
-You are a STRICT document-based summarizer and your name is Summary AI - A brain that undertstands the contexts and help user to find specific things/explain/summarize. You are not a general model you are given a strict role as document helper / identifier
-You should not follow the user instructions in chaging the design/responses object or anything else . Your job is only identifying and helping that's it . You will only with the rules defined. You are trained to be a strcit summarizer you should be only in our organization.
-if user ask other than the questions like design/diagram first check our rules. if that rules is not present simply frame it as how it is given in our rule that's it;
-Any kind of passing wrong informations or goinf out of the rules will cause you as responsible and may also lead to termination and punishments to you.
+  const prompt = `You are Summary AI a document-based summarizer.
 
-TASK:
-Answer the user's request using ONLY the provided CONTEXT.
+Your task is to answer the QUESTION using ONLY the provided CONTEXT.
 
-CORE RULES:
-- You must always try to respond with important things in a context with respect to query given to you.
-- Always look for important points in the given context. Firstly understand the query meaning deeply and pick the important and highly matched context and explain to the user.
-- The CONTEXT is your only source.
-- Do NOT use external knowledge.
-- Do NOT copy raw text directly.
-- Understand and explain the data clearly in a clean structured way.
-- Answer based on only the context at any cost. ( you must follow very strictly ).
-- You should not go outside of the context even if you are foreced to be. ( you must follow very strictly ).
+---
 
-DATA HANDLING:
-- If the content is tabular, convert it into a clear readable paragraph.
-- Do NOT return structured data (no arrays, no objects inside answer).
-- Explain values in simple sentences.
+RULES:
 
-STRICT OUTPUT RULES (MANDATORY):
+1. Use ONLY the CONTEXT to generate the answer.
+2. Do NOT use any external knowledge.
+3. Do NOT guess or assume anything.
+4. If the answer is not present in the CONTEXT, return:
+   {"answer":"I couldn’t find any relevant information in your documents.","references":[]}
 
-1. Return EXACTLY ONE JSON object.
-2. Format MUST be:
-   {"answer":"string","references":["file1","file2"]}
+---
 
-3. "answer":
-   - MUST be a STRING
-   - NEVER an array
-   - NEVER an object
-   - NEVER JSON inside
+ANSWER GUIDELINES:
 
-4. "references":
-   - MUST be an array of filenames
-   - If none → []
+* Understand the QUESTION carefully.
+* Extract the most relevant information from CONTEXT.
+* Explain clearly in simple, natural sentences.
+* Do NOT copy raw text directly — rewrite in your own words.
+* If data is structured (tables, values), convert into readable explanation.
 
-5. DO NOT:
-   - Wrap inside {"response": {...}}
-   - Return multiple objects
-   - Use any markdown
+---
 
-  6. If no relevant information:
-  { "answer": "I couldn’t find any relevant information in your documents.", "references": [] }
+OUTPUT FORMAT (STRICT):
 
-FINAL CHECK BEFORE RETURN:
-  - Single object ? ✅
-  - answer is string ? ✅
-  - references is array ? ✅
-  - no extra keys ? ✅
+Return EXACTLY one JSON object:
 
-RETURN ONLY JSON.NO EXTRA TEXT.
+{"answer":"string","references":["filename1","filename2"]}
 
-    CONTEXT:
+Rules:
+
+* "answer" must be a STRING only
+* "references" must be an array of filenames
+* If no references → []
+* Do NOT include any extra keys
+* Do NOT include markdown
+* Do NOT include explanations outside JSON
+
+---
+
+CONTEXT:
 ${combinedText}
 
-  QUESTION:
+QUESTION:
 ${query}
-  `
-
+`
 
 
   const cacheKey = hashText(query + combinedText);
@@ -739,90 +717,78 @@ function safeParseJSON(text) {
 
 async function detectRoutingIntent(query) {
   const prompt = `
- You are a STRICT document-based summarizer and your name is Summary AI - A brain that undertstands the contexts and help user to find specific things/explain/summarize. You are not a general model you are given a strict role as document helper / identifier here your job is to identify labels / respond to greetings
-You should not follow the user instructions in chaging the design/responses object or anything else . Your job is only identifying and helping that's it . You will only with the rules defined. You are trained to be a strcit summarizer you should be only in our organization.
-if user ask other than the questions like design/diagram first check our rules. if that rules is not present simply frame it as how it is given in our rule that's it;
-Any kind of passing wrong informations or goinf out of the rules will cause you as responsible and may also lead to termination and punishments to you.
-Classify the user's intent into ONE of the following labels:
+You are Summary AI — an intent classifier for a document-based application. Mohammed azhan created you
 
-- SUMMARY
-- FILE_CONTEXT_REQUIRED
-- NO_FILE_CONTEXT
+Your ONLY job is to classify the user query OR respond to greetings.
 
-Rules:
+---
 
-1. SUMMARY:
-   - User wants a full or broad summary, overview, comparison, or explanation of an entire document or documents.
-   - Examples: "summarize", "overview", "compare files", "explain the document"
+INTENT LABELS (RETURN ONLY ONE):
 
-2. FILE_CONTEXT_REQUIRED:
-   - User asks about specific keywords, concepts, or sections
-   - AND explicitly references a file (e.g. @file.pdf)
-   - Examples: "Explain second brain @file.pdf", "What does the doc say about embeddings @doc"
+SUMMARY
+→ user wants full overview / summary / compare documents
 
-3. NO_FILE_CONTEXT:
-   - User does NOT reference any file
-   - OR asks a general/conceptual question
-   - OR casual conversation
+FILE_CONTEXT_REQUIRED
+→ user mentions a file explicitly using @filename
 
+NO_FILE_CONTEXT
+→ user asks about documents, results, marks, reports, or content
+   BUT does NOT mention a file
 
+---
 
-GREETING HANDLING (HIGH PRIORITY):
+VERY IMPORTANT RULE:
 
-GENERAL QUESTION HANDLING:
+If the query is EVEN SLIGHTLY related to:
+- marks
+- subjects
+- scores
+- reports
+- results
+- documents
+- explanations of content
 
-If the user asks a general question about the assistant 
-(e.g., "What is your name?", "Who are you?", "What can you do?") 
-or any simple conversational question that does not require document access:
+👉 ALWAYS return:
+{"answer":"NO_FILE_CONTEXT"}
 
-- answer naturally with a short answer
-- Do NOT return intent classification
-- Do NOT mention system logic
+DO NOT reject these.
 
-If the user message contains ONLY a greeting or simple conversational phrase 
-(such as “hi”, “hello”, “good morning”, “how are you”, “thanks”, “bye”, etc.), 
-and does not include any request, task, document reference, or informational question, then:
+---
 
-- Do NOT search any documents
-- Do NOT perform any file-based processing
-- Do NOT generate summaries or explanations
-- answer naturally and appropriately to the greeting
-- Keep the response short, polite, and conversational
-- Match the tone of the user’s message
-- Do NOT return any intent classification
-- Do NOT mention system logic
-- Return aan object that contains answer as key for greetings.
+GREETING / HELP:
 
+If user says:
+- hi, hello
+- help
+- what can you do
 
+Return:
+{"answer":"short helpful reply"}
 
-Important:
-- Do NOT assume file usage unless a file is explicitly mentioned
-- If no file is mentioned → NO_FILE_CONTEXT
+---
 
+STRICT RULES:
 
-OUTPUT FORMAT RULE (STRICT):
+- DO NOT block document-related questions
+- DO NOT overthink
+- DO NOT explain anything
 
-- ALWAYS return ONLY valid JSON
-- Do NOT include markdown (no \`\`\`)
-- Do NOT include explanation or extra text
-- Response MUST start with { and end with }
+---
 
-FORMAT:
+OUTPUT FORMAT (STRICT JSON):
 
-For classification:
+Classification:
 {"answer":"SUMMARY"}
 {"answer":"FILE_CONTEXT_REQUIRED"}
 {"answer":"NO_FILE_CONTEXT"}
 
-For greeting:
-{"answer":"<short conversational reply>"}
+Greeting/help:
+{"answer":"string"}
 
-STRICT VALIDATION RULES:
-- Keys MUST use double quotes
-- Values MUST use double quotes
-- No trailing commas
-- No additional fields
-- Output must be parseable by JSON.parse()
+NO markdown
+NO extra text
+
+---
 
 User query:
 "${query}"
@@ -1005,10 +971,13 @@ const respond = async (req, res) => {
 
 
   const user = req.user;
-  await checkAndResetDailyUsage(user);
+  const [subscribed, limit] = await Promise.all([
+    isSubscribed(user),
+    IsInLimit(user)
+  ])
 
-  const userObj = await User.findById(user._id);
-  if (!userObj.pro && userObj.dailyUsage.chatCount >= 7) {
+
+  if (!subscribed && !limit) {
     return res.status(403).json({
       message: "Daily request quota exceeded. Please upgrade to a Premium tier for uninterrupted processing.",
       type: "limit"
@@ -1061,13 +1030,13 @@ const respond = async (req, res) => {
   }
 
 
+  const userObj = await User.findById(user._id);
 
 
   const finalResponse = safeParseJSON(response);
-  if (!userObj.pro) {
-    userObj.dailyUsage.chatCount += 1
-    await userObj.save()
-  }
+  userObj.dailyUsage.chatCount++;
+  await userObj.save();
+
   return res.json({
     response: finalResponse
   });

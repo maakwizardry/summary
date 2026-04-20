@@ -167,23 +167,35 @@ const getUserProfile = async (req, res) => {
     return res.status(404).json({ message: "We couldn't found any account with this email address" });
   }
 
-  res.status(200).json({
-    id: req.user._id,
-    username: req.user.username,
-    email: req.user.email,
-    pro: req.user.pro,
-    name: req.user.name, // include other safe fields
-    subscription: req.user.subscription,
-    createdAt: req.user.createdAt,
-    customerId: req.user.customerId
-  });
+  try {
+    const user = await User.findById(req.user._id);
+
+    return res.status(200).json({
+      id: user._id,
+      email: user.email,
+      username: user.username,
+      subscriptionStatus: user.subscriptionStatus,
+      isVerified: user.isVerified,
+
+    });
+  }
+  catch (e) {
+    return res.status(500).json({ message: "Something went wrong." });
+  }
 };
 
 const isLoggedIn = async (req, res) => {
   if (!req.user) {
     return res.status(404).json({ message: "Unauthourized" });
   }
-  return res.status(200).json({ status: true });
+  const user = await User.findById(req.user._id);
+
+  return res.status(200).json({
+    id: user._id,
+    email: user.email,
+    isVerified: user.isVerified,
+
+  });
 }
 
 const Google = async (req, res) => {
@@ -235,7 +247,18 @@ const Google = async (req, res) => {
         limit: 0,
         pro: false,
       });
+
+
+      const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.FRONTEND_URL}/summary` });
+      if (status) {
+        console.log("Welcome email sent successfully");
+      }
+      else {
+        console.log("Failed to send welcome email");
+      }
+
     }
+
 
     // 5️⃣ Issue app JWT
     const appToken = jwt.sign(
@@ -409,6 +432,9 @@ const verifyResetPassword = async (req, res) => {
       return res.status(404).json({ message: "Token is expired or broken" });
     }
     if (user.resetPasswordExpires < Date.now()) {
+      user.resetPasswordToken = null;
+      user.resetPasswordExpires = null;
+      await user.save();
       return res.status(404).json({ message: "Token has expired" });
     }
     user.password = await bcrypt.hash(password, 10);

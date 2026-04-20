@@ -31,21 +31,8 @@ const userSchema = new mongoose.Schema({
         default: "local"
     },
 
-    // 🔥 QUICK ACCESS FLAG (important)
-    pro: {
-        type: Boolean,
-        default: false
-    },
-
-    // 🔥 SUBSCRIPTION DETAILS
-
-    // 🔥 USAGE TRACKING
     dailyUsage: {
         chatCount: {
-            type: Number,
-            default: 0
-        },
-        uploadCount: {
             type: Number,
             default: 0
         },
@@ -55,7 +42,6 @@ const userSchema = new mongoose.Schema({
         }
     },
 
-    // 🔐 AUTH / VERIFICATION
     emailVerifyToken: String,
     emailVerifyExpires: Date,
 
@@ -73,16 +59,9 @@ const userSchema = new mongoose.Schema({
         default: null
     },
 
-    // ⚡ FEATURE LIMIT CONTROL (for free users)
     limit: {
         type: Number,
         default: 0
-    }
-    ,
-    SubscriptionStatus: {
-        type: String,
-        enum: ["active", "cancelled", "expired", "past_due", null],
-        default: null
     },
 
 }, {

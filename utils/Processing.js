@@ -16,111 +16,123 @@ const Tesseract = require("tesseract.js");
 async function extractText(file) {
     const ext = file.originalname.split(".").pop().toLowerCase();
 
-    // ✅ PDF
+    // =========================
+    // ✅ PDF (LLM OPTIMIZED)
+    // =========================
     if (ext === "pdf") {
         const loadingTask = pdfjsLib.getDocument({
             data: new Uint8Array(file.buffer),
-            standardFontDataUrl: path.join(
-                __dirname,
-                "node_modules/pdfjs-dist/standard_fonts/"
-            )
+            useSystemFonts: true,
         });
 
         const pdf = await loadingTask.promise;
-        let fullText = "";
+        let finalText = [];
 
-        for (let i = 1; i <= pdf.numPages; i++) {
-            const page = await pdf.getPage(i);
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+            try {
+                const page = await pdf.getPage(pageNum);
+                const textContent = await page.getTextContent();
+                const items = textContent.items;
 
-            // =========================
-            // 🔥 1. EXTRACT TEXT LAYER
-            // =========================
-            const textContent = await page.getTextContent();
-            const textItems = textContent.items;
+                // =========================
+                // 🔥 GROUP BY LINES (KEY FIX)
+                // =========================
+                const lines = {};
 
-            const textLayer = textItems.map(i => i.str).join(" ").trim();
+                items.forEach(item => {
+                    const y = Math.round(item.transform[5]);
+                    if (!lines[y]) lines[y] = [];
+                    lines[y].push(item);
+                });
 
-            // =========================
-            // 🔥 2. DETECT IMAGE SIGNAL
-            // =========================
-            const operatorList = await page.getOperatorList();
+                const sortedLines = Object.keys(lines)
+                    .map(y => ({
+                        y: Number(y),
+                        items: lines[y].sort((a, b) => a.transform[4] - b.transform[4])
+                    }))
+                    .sort((a, b) => b.y - a.y);
 
-            const hasImages = operatorList.fnArray.some(fn =>
-                fn === pdfjsLib.OPS.paintImageXObject ||
-                fn === pdfjsLib.OPS.paintJpegXObject
-            );
+                // =========================
+                // 🔥 BUILD LLM-FRIENDLY TEXT
+                // =========================
+                let structuredLines = [];
 
-            const textDensity = textItems.length;
+                for (const line of sortedLines) {
+                    const words = line.items.map(i => i.str.trim()).filter(Boolean);
 
-            // =========================
-            // 🔥 3. DECIDE TYPE
-            // =========================
-            const isTextHeavy = textDensity > 30;
-            const isScanned = textDensity < 10 && hasImages;
-            const isHybrid = hasImages && textDensity >= 10;
+                    if (words.length === 0) continue;
 
-            let finalPageText = "";
+                    // Label: Value detection
+                    if (words.length === 2 && !isNaN(words[1])) {
+                        structuredLines.push(`${words[0]}: ${words[1]}`);
+                    }
+                    else if (words.length > 2) {
+                        const last = words[words.length - 1];
 
-            // =========================
-            // 🔥 4. TEXT HEAVY → USE TEXT
-            // =========================
-            if (isTextHeavy) {
-                finalPageText = textLayer;
+                        if (!isNaN(last)) {
+                            const label = words.slice(0, -1).join(" ");
+                            structuredLines.push(`${label}: ${last}`);
+                        } else {
+                            structuredLines.push(words.join(" "));
+                        }
+                    }
+                    else {
+                        structuredLines.push(words.join(" "));
+                    }
+                }
+
+                let pageText = structuredLines.join("\n");
+
+                // =========================
+                // 🔍 OCR (ONLY IF NEEDED)
+                // =========================
+                const isTextPoor = items.length < 10;
+
+                if (isTextPoor) {
+                    const viewport = page.getViewport({ scale: 2 });
+
+                    const canvas = createCanvas(viewport.width, viewport.height);
+                    const ctx = canvas.getContext("2d");
+
+                    await page.render({
+                        canvasContext: ctx,
+                        viewport
+                    }).promise;
+
+                    const buffer = canvas.toBuffer("image/png");
+
+                    const { data } = await Tesseract.recognize(buffer, "eng");
+
+                    const ocrText = data.text.replace(/\s+/g, " ").trim();
+
+                    if (!pageText) {
+                        pageText = ocrText;
+                    } else {
+                        if (!ocrText.toLowerCase().includes(pageText.slice(0, 50).toLowerCase())) {
+                            pageText += "\n" + ocrText;
+                        }
+                    }
+                }
+
+                finalText.push(pageText);
+
+            } catch (err) {
+                console.error(`Page ${pageNum} failed`, err);
             }
-
-            // =========================
-            // 🔥 5. SCANNED → USE OCR
-            // =========================
-            else if (isScanned) {
-                const ocrText = await runOCR(page);
-                finalPageText = ocrText;
-            }
-
-            // =========================
-            // 🔥 6. HYBRID → MERGE BOTH
-            // =========================
-            else if (isHybrid) {
-                const ocrText = await runOCR(page);
-
-                finalPageText = mergeHybrid(textLayer, ocrText);
-            }
-
-            fullText += finalPageText + "\n\n";
         }
 
-        return cleanFinal(fullText);
+        console.log(cleanForLLM(finalText.join("\n\n")));
+
+        return cleanForLLM(finalText.join("\n\n"));
     }
+
+    // =========================
     // ✅ DOCX
+    // =========================
     if (ext === "docx") {
-        // const result = await mammoth.extractRawText({
-        //     buffer: file.buffer
-        // });
-        // return console.log(result.value);
-        const result = await mammoth.convertToHtml({ buffer: file.buffer });
-        let html = result.value;
+        const result = await mammoth.extractRawText({ buffer: file.buffer });
+        let text = result.value;
 
-        // =========================
-        // 🔥 2. PRESERVE TABLE STRUCTURE
-        // =========================
-        html = html
-            .replace(/<\/tr>/g, "\n")
-            .replace(/<\/td>/g, " ")
-            .replace(/<\/th>/g, " ")
-            .replace(/<\/p>/g, "\n");
-
-        // remove tags
-        let text = html.replace(/<[^>]+>/g, "");
-
-        // clean spacing
-        text = text
-            .replace(/\r/g, "")
-            .replace(/ {2,}/g, " ")
-            .replace(/\n+/g, "\n")
-            .trim();
-
-        // =========================
-        // 🔥 3. IMAGE OCR (SAFE)
-        // =========================
         const zip = await JSZip.loadAsync(file.buffer);
         const imageTexts = [];
 
@@ -128,10 +140,9 @@ async function extractText(file) {
             if (fileName.startsWith("word/media/")) {
                 const imageBuffer = await zip.files[fileName].async("nodebuffer");
 
-                const { data } = await Tesseract.recognize(imageBuffer, "eng+tam");
-                const cleaned = data.text.replace(/[^a-zA-Z0-9:/.,()%\- ]/g, " ")
-                    .replace(/\s+/g, " ")
-                    .trim();
+                const { data } = await Tesseract.recognize(imageBuffer, "eng");
+
+                const cleaned = data.text.replace(/\s+/g, " ").trim();
 
                 if (cleaned.length > 5) {
                     imageTexts.push(cleaned);
@@ -139,122 +150,71 @@ async function extractText(file) {
             }
         }
 
-        // =========================
-        // 🔥 4. MERGE TEXT + OCR
-        // =========================
-        let combined = text;
-
         if (imageTexts.length > 0) {
-            combined += "\n\n[Extracted from images]\n" + imageTexts.join("\n");
+            text += "\n\n" + imageTexts.join("\n");
         }
 
-        // =========================
-        // 🔥 5. SAFE LINE MERGING (FIXED)
-        // =========================
-        const lines = combined.split("\n").map(l => l.trim())
-            .filter(l => l.length > 0);
-        const finalLines = [];
-
-        for (let i = 0; i < lines.length; i++) {
-            const current = lines[i].trim();
-            const next = lines[i + 1]?.trim();
-
-            // 🔥 safer merging (no data loss)
-            if (
-                next &&
-                current.length <= 3 &&
-                !/\d/.test(current) &&
-                /\d/.test(next)
-            ) {
-                finalLines.push(current + " " + next);
-                i++;
-            } else {
-                finalLines.push(current);
-            }
-        }
-
-        let finalText = finalLines.join("\n");
-
-        finalText = finalText
-            .replace(/[^\x00-\x7F]/g, " ")
-            .replace(/\s+/g, " ")
-            .replace(/\n+/g, "\n")
-            .trim();
-
-        return finalText;
-
-
-
-
+        return cleanAndStructureForLLM(text);
     }
 
+    // =========================
     // ✅ TXT
+    // =========================
     if (ext === "txt") {
         return file.buffer.toString("utf-8");
     }
+
+
     if (["png", "jpg", "jpeg"].includes(ext)) {
         const { data } = await Tesseract.recognize(file.buffer, "eng");
-        return data.text;
+        return cleanForLLM(data.text);
     }
 
-    // ❌ unsupported
     throw new Error("Unsupported file type");
 }
 
+function cleanForLLM(text) {
+    return text
+        .replace(/\r/g, "")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n{2,}/g, "\n")
+        .trim();
+}
 
-
-
-
-
-
-// ---------------- CHUNKING ----------------
-
-// function chunkText(text, maxChars = 500, overlapSentences = 1) {
-//     if (!text || !text.trim()) return [];
-
-//     const clean = text
-//         .replace(/\r/g, "")
-//         .replace(/[ \t]+/g, " ")
-//         .trim();
-
-//     const sentences = clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
-
-//     const chunks = [];
-//     let currentChunk = [];
-
-//     for (let i = 0; i < sentences.length; i++) {
-//         const sentence = sentences[i];
-//         const combined = [...currentChunk, sentence].join(" ");
-
-//         if (combined.length <= maxChars) {
-//             currentChunk.push(sentence);
-//         } else {
-//             chunks.push(currentChunk.join(" ").trim());
-
-//             // 🔥 overlap by last N sentences
-//             currentChunk = currentChunk.slice(-overlapSentences);
-//             currentChunk.push(sentence);
-//         }
-//     }
-
-//     if (currentChunk.length > 0) {
-//         chunks.push(currentChunk.join(" ").trim());
-//     }
-
-//     return chunks;
-// }
-
-function normalizeStructuredData(text) {
-    const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+function cleanAndStructureForLLM(text) {
+    const lines = text
+        .split("\n")
+        .map(l => l.trim())
+        .filter(Boolean);
 
     const result = [];
 
-    for (let i = 0; i < lines.length - 1; i++) {
-        if (!isNaN(lines[i + 1])) {
-            result.push(`${lines[i]}: ${lines[i + 1]}`);
-            i++;
-        } else {
-            result.push(lines[i]);
+    for (let i = 0; i < lines.length; i++) {
+        const words = lines[i].split(" ").filter(Boolean);
+
+        if (words.length === 0) continue;
+
+        // Case 1: Subject Value
+        if (words.length === 2 && !isNaN(words[1])) {
+            result.push(`${words[0]}: ${words[1]}`);
+        }
+
+        // Case 2: Multiple subjects + values (danger case)
+        else if (words.length > 2) {
+            const nums = words.filter(w => !isNaN(w));
+            const texts = words.filter(w => isNaN(w));
+
+            if (nums.length === texts.length && nums.length > 0) {
+                for (let j = 0; j < nums.length; j++) {
+                    result.push(`${texts[j]}: ${nums[j]}`);
+                }
+            } else {
+                result.push(words.join(" "));
+            }
+        }
+
+        else {
+            result.push(words.join(" "));
         }
     }
 
@@ -293,52 +253,7 @@ function chunkText(text, maxChars = 600, overlapSentences = 1) {
 
     return chunks;
 }
-async function embedText(text) {
-    if (!text || !text.trim()) return null;
-
-    const normalized = text.replace(/\s+/g, " ").trim();
-
-    const safeText = normalized.length > 3000
-        ? normalized.slice(0, 3000) + "..."
-        : normalized;
 
 
 
-    try {
-        const result = await embeddingModel.embedContent({
-            content: {
-                parts: [{ text: safeText }]
-            },
-            outputDimensionality: 768
-        });
-
-        return result.embedding.values;
-    } catch (err) {
-        console.error("Embedding failed:", err.message);
-        return null;
-    }
-}
-
-
-function cosineSimilarity(a, b) {
-
-    if (!a || !b || a.length !== b.length) return -1;
-
-    let dot = 0;
-    let normA = 0;
-    let normB = 0;
-
-    for (let i = 0; i < a.length; i++) {
-        dot += a[i] * b[i];
-        normA += a[i] ** 2;
-        normB += b[i] ** 2;
-    }
-
-    if (normA === 0 || normB === 0) return -1;
-
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
-
-
-
-module.exports = { extractText, chunkText, embedText, cosineSimilarity };
+module.exports = { extractText, chunkText };

@@ -7,6 +7,7 @@ const UserRouter = require("./routes/userRoute");
 const BriefRouter = require("./routes/BriefRoute");
 const ContactRouter = require("./routes/ContactRoute");
 const PaymentRouter = require("./routes/PaymentRoute");
+const SubscriptionRouter = require('./routes/SubscriptionRoute');
 const connectDB = require("./config/db");
 const userMiddleware = require("./middleware/userMiddleware");
 const User = require('./models/User');
@@ -87,7 +88,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
     return res.sendStatus(200);
   }
 
-  await Subscription.updateMany({ userId, status: "active" }, { status: "expired" });
 
 
   // =========================
@@ -95,16 +95,18 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
   // =========================
   try {
     if (eventName === "subscription_created") {
-      // await Subscription.updateMany(
-      //   { userId: userId, status: "active" },
-      //   { status: "expired" }
-      // );
+      await Subscription.updateMany(
+        { userId, status: "active" },
+        { status: "expired" }
+      );
+
       console.log(event);
 
       const sub = event.data;
       const attr = sub.attributes; // ✅ FIXED
+      const isActive = new Date(attr.renews_at) > new Date();
 
-      const response = await Subscription.findOneAndUpdate(
+      await Subscription.findOneAndUpdate(
         { subscriptionId: sub.id },
         {
           subscriptionId: sub.id, // ✅ IMPORTANT
@@ -115,7 +117,7 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
           productId: attr.product_id,
           name: attr.product_name,
           variantName: attr.variant_name,
-          status: attr.status,
+          status: isActive ? "active" : "expired",
           plan: "pro",
           startDate: new Date(attr.created_at), // ✅ better
           currentPeriodEnd: new Date(attr.renews_at), // ✅ better
@@ -126,12 +128,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         },
         { upsert: true, new: true }
       );
-      const user = await User.findByIdAndUpdate(userId, {
-        pro: true,
-        SubscriptionStatus: attr.status,
-      });
-      console.log(user);
-      console.log("✅ Subscription saved/updated");
       return res.sendStatus(200);
     }
 
@@ -148,11 +144,12 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
     try {
       const sub = event.data;
       const attr = sub.attributes;
+      const isActive = new Date(attr.renews_at) > new Date();
 
       await Subscription.findOneAndUpdate(
         { subscriptionId: sub.id }, // 🔥 match using subscriptionId
         {
-          status: attr.status,
+          status: isActive ? "active" : "expired",
           currentPeriodEnd: new Date(attr.renews_at),
           cancelled: attr.cancelled
         }
@@ -205,6 +202,8 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
   if (eventName === "subscription_expired") {
     try {
       const sub = event.data;
+      const attr = sub.attributes;
+
 
       // ✅ 1. Update Subscription collection (MAIN SOURCE)
       await Subscription.findOneAndUpdate(
@@ -214,11 +213,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         }
       );
 
-      // ✅ 2. Remove PRO access from user
-      await User.findByIdAndUpdate(userId, {
-        pro: false,
-        SubscriptionStatus: attr.status,
-      });
 
       console.log("⌛ Subscription expired");
       return res.sendStatus(200);
@@ -240,6 +234,7 @@ app.use("/api/users", UserRouter);
 app.use("/api/process", BriefRouter);
 app.use("/api/contact", ContactRouter);
 app.use("/api/payment", PaymentRouter);
+app.use('/api/subscription', SubscriptionRouter);
 
 
 
