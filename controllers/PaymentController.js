@@ -3,7 +3,7 @@ const { default: axios } = require('axios');
 const Subscription = require("../models/Subscription");
 const User = require("../models/User");
 const jwt = require('jsonwebtoken');
-require('dotenv').config();
+
 
 const lsqyConfig = {
     API_KEY: process.env.LEMONSQUEEZY_API_KEY,
@@ -85,7 +85,7 @@ const subscribtion = async (req, res) => {
                             }
                         },
                         product_options: {
-                            redirect_url: `https://www.getsummaryapp.com/billing`,
+                            redirect_url: process.env.LEMON_SQUEEZY_REDIRECT_URL,
                             receipt_button_text: "Go to Dashboard"
                         }
                     },
