@@ -1,5 +1,5 @@
 const userRouter = require("express").Router();
-const { register, deleteOldUnverifiedUsers, login, getUserProfile, isLoggedIn, verifyResetPassword, getStatus, Google, resetPassword, verifyUser, resendEmailVerification } = require("../controllers/UserController");
+const { register, deleteOldUnverifiedUsers, login, getUserProfile, isLoggedIn, verifyResetPassword, getStatus, Google, resetPassword, verifyUser, resendEmailVerification, updateProfile } = require("../controllers/UserController");
 const protect = require("../middleware/userMiddleware")
 userRouter.post("/register", register);
 userRouter.post("/login", login);
@@ -8,6 +8,7 @@ userRouter.post("/google", Google);
 userRouter.get("/status", getStatus);
 userRouter.post("/verify-email", verifyUser);
 userRouter.get("/profile", protect, getUserProfile);
+userRouter.put("/profile", protect, updateProfile);
 userRouter.post("/forgot-password", resetPassword);
 userRouter.get("/isLoggedIn", protect, isLoggedIn);
 userRouter.post("/verify-reset-password", verifyResetPassword);

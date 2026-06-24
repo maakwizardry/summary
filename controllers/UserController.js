@@ -169,6 +169,7 @@ const getUserProfile = async (req, res) => {
 
   try {
     const user = await User.findById(req.user._id);
+    console.log(user);
 
     return res.status(200).json({
       id: user._id,
@@ -176,10 +177,55 @@ const getUserProfile = async (req, res) => {
       username: user.username,
       subscriptionStatus: user.subscriptionStatus,
       isVerified: user.isVerified,
-
+      createdAt: user.createdAt,
+      authProvider: user.authProvider,
+      dailyUsage: user.dailyUsage,
+      createdAt: user.createdAt,
     });
   }
   catch (e) {
+    return res.status(500).json({ message: "Something went wrong." });
+  }
+};
+
+const updateProfile = async (req, res) => {
+  if (!req.user) {
+    return res.status(404).json({ message: "Unauthorized" });
+  }
+
+  try {
+    const { username, password } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (username) {
+      user.username = username;
+    }
+
+    if (password && user.authProvider === "local") {
+      const salt = await bcrypt.genSalt(12);
+      user.password = await bcrypt.hash(password, salt);
+    }
+
+    await user.save();
+
+    return res.status(200).json({
+      message: "Profile updated successfully",
+      user: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        isVerified: user.isVerified,
+        createdAt: user.createdAt,
+        authProvider: user.authProvider,
+        dailyUsage: user.dailyUsage
+      }
+    });
+  } catch (error) {
+    console.error(error);
     return res.status(500).json({ message: "Something went wrong." });
   }
 };
@@ -449,7 +495,21 @@ const verifyResetPassword = async (req, res) => {
 }
 
 
+const fixCreatedAt = async (req, res) => {
+  try {
+    const result = await User.collection.updateMany(
+      { $or: [{ createdAt: { $exists: false } }, { createdAt: null }] },
+      { $set: { createdAt: new Date() } }
+    );
+
+    return res.status(200).json({ message: "success", updatedCount: result.modifiedCount });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: "Something went wrong." });
+  }
+};
+
 // runs every hour
 
 
-module.exports = { register, login, getUserProfile, resetPassword, Google, isLoggedIn, getStatus, deleteOldUnverifiedUsers, verifyUser, resendEmailVerification, verifyResetPassword };
+module.exports = { register, login, getUserProfile, resetPassword, Google, isLoggedIn, getStatus, deleteOldUnverifiedUsers, verifyUser, resendEmailVerification, verifyResetPassword, updateProfile, fixCreatedAt };

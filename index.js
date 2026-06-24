@@ -64,15 +64,11 @@ const verifySignature = (rawBody, signature) => {
 
 
 app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  console.log("🔥 WEBHOOK HIT");
-
-
   const signature = req.headers["x-signature"];
 
   const isValid = verifySignature(req.body, signature);
 
   if (!isValid) {
-    console.log("❌ Invalid signature");
     return res.sendStatus(401);
   }
   const event = JSON.parse(req.body.toString());
@@ -84,7 +80,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
 
   // ❌ Safety check
   if (!userId) {
-    console.log("⚠️ (no userId):", eventName);
     return res.sendStatus(200);
   }
 
@@ -99,8 +94,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         { userId, status: "active" },
         { status: "expired" }
       );
-
-      console.log(event);
 
       const sub = event.data;
       const attr = sub.attributes; // ✅ FIXED
@@ -128,11 +121,11 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         },
         { upsert: true, new: true }
       );
+
       return res.sendStatus(200);
     }
 
   } catch (e) {
-    console.log(e);
     return res.status(500)
   }
 
@@ -155,7 +148,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         }
       );
 
-      console.log("🔁 Subscription updated");
       return res.sendStatus(200);
 
     } catch (err) {
@@ -187,7 +179,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         SubscriptionStatus: attr.status,
       });
 
-      console.log("❌ Subscription cancelled (but still active until expiry)");
       return res.sendStatus(200);
 
     } catch (err) {
@@ -213,8 +204,6 @@ app.post("/api/lemonsqueezy/webhook", express.raw({ type: "application/json" }),
         }
       );
 
-
-      console.log("⌛ Subscription expired");
       return res.sendStatus(200);
 
     } catch (err) {
@@ -240,7 +229,9 @@ app.use('/api/subscription', SubscriptionRouter);
 
 app.get('/api/memory/files', userMiddleware, async (req, res) => {
   try {
-    const files = await File.find({ user_id: req.user._id }).select("-mimetype -total_chunks -reason -user_id");
+    const files = await File.find({ user_id: req.user._id })
+      .select("-mimetype -total_chunks -reason -user_id")
+      .sort({ createdAt: -1 });
     res.status(200).json(files);
   } catch (error) {
     // console.error("Error fetching files:", error);
@@ -259,6 +250,10 @@ app.get("/", async (req, res) => {
 
 // Connect to database
 connectDB();
+
+// Start Background Worker
+const { startWorker } = require("./services/worker");
+startWorker();
 
 // Start server
 const PORT = process.env.PORT || 3001;
