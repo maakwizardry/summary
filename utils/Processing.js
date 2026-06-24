@@ -13,7 +13,11 @@ const { createCanvas } = require("canvas");
 const Tesseract = require("tesseract.js");
 
 // ✅ DOCX parser
+const fs = require('fs');
 async function extractText(file) {
+    if (!file.buffer && file.path) {
+        file.buffer = fs.readFileSync(file.path);
+    }
     const ext = file.originalname.split(".").pop().toLowerCase();
 
     // =========================
@@ -27,6 +31,7 @@ async function extractText(file) {
 
         const pdf = await loadingTask.promise;
         let finalText = [];
+        let ocrPages = 0;
 
         for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
             try {
@@ -89,6 +94,7 @@ async function extractText(file) {
                 const isTextPoor = items.length < 10;
 
                 if (isTextPoor) {
+                    ocrPages++;
                     const viewport = page.getViewport({ scale: 2 });
 
                     const canvas = createCanvas(viewport.width, viewport.height);
@@ -121,7 +127,6 @@ async function extractText(file) {
             }
         }
 
-        console.log(cleanForLLM(finalText.join("\n\n")));
 
         return cleanForLLM(finalText.join("\n\n"));
     }
@@ -164,12 +169,54 @@ async function extractText(file) {
         return file.buffer.toString("utf-8");
     }
 
-
     if (["png", "jpg", "jpeg"].includes(ext)) {
-        const { data } = await Tesseract.recognize(file.buffer, "eng");
-        return cleanForLLM(data.text);
-    }
 
+        // Upscale + OCR friendly preprocessing
+        const optimized = await sharp(file.buffer)
+            .grayscale()
+            .normalize()
+            .sharpen()
+            .resize({
+                width: 3500,
+                withoutEnlargement: false
+            })
+            .png()
+            .toBuffer();
+
+        const { data } = await Tesseract.recognize(
+            optimized,
+            "eng",
+            {
+                logger: () => { },
+                tessedit_pageseg_mode: 11, // Sparse text mode
+                preserve_interword_spaces: "1"
+            }
+        );
+
+        // Extract individual words instead of relying only on data.text
+        const words = (data.words || [])
+            .filter(word =>
+                word.text &&
+                word.text.trim().length > 0 &&
+                word.confidence > 30
+            )
+            .map(word => word.text.trim());
+
+        let text = words.join(" ");
+
+        // Fallback if words extraction fails
+        if (text.length < 100) {
+            text = data.text;
+        }
+
+        // Cleanup
+        text = text
+            .replace(/\s+/g, " ")
+            .replace(/[^\S\r\n]+/g, " ")
+            .trim();
+
+        return cleanForLLM(text);
+    }
     throw new Error("Unsupported file type");
 }
 
@@ -220,35 +267,56 @@ function cleanAndStructureForLLM(text) {
 
     return result.join("\n");
 }
+// function chunkText(text, chunkSize = 1000, overlap = 200) {
 
-function chunkText(text, maxChars = 600, overlapSentences = 1) {
-    if (!text) return [];
+//     if (!text) return [];
 
-    const clean = text.replace(/\s+/g, " ").trim();
+//     const chunks = [];
 
-    const sentences = clean.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [];
+//     let start = 0;
+
+//     while (start < text.length) {
+
+//         chunks.push(
+//             text.slice(start, start + chunkSize)
+//         );
+
+//         start += (chunkSize - overlap);
+//     }
+
+//     return chunks;
+// }
+
+function chunkText(text, maxSize = 2000) {
+    const paragraphs = text
+        .split(/\n\s*\n/)
+        .filter(Boolean);
+
+    // console.log(paragraphs);
 
     const chunks = [];
-    let currentChunk = [];
 
-    for (let i = 0; i < sentences.length; i++) {
-        const sentence = sentences[i];
+    let current = "";
 
-        const combined = [...currentChunk, sentence].join(" ");
+    for (const p of paragraphs) {
 
-        if (combined.length <= maxChars) {
-            currentChunk.push(sentence);
+        // cosnole.log(current + "\n");
+
+        if ((current + "\n\n" + p).length > maxSize) {
+
+
+            chunks.push(current);
+
+            current = p;
+
         } else {
-            chunks.push(currentChunk.join(" ").trim());
 
-            // ✅ overlap by sentence (SAFE)
-            currentChunk = currentChunk.slice(-overlapSentences);
-            currentChunk.push(sentence);
+            current += (current ? "\n\n" : "") + p;
         }
     }
 
-    if (currentChunk.length > 0) {
-        chunks.push(currentChunk.join(" ").trim());
+    if (current) {
+        chunks.push(current);
     }
 
     return chunks;

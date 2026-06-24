@@ -30,6 +30,27 @@ if (provider === "GEMINI") {
 
 
 
+    const withRetry = async (fn, retries = 3, delayMs = 2000) => {
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await fn();
+            } catch (error) {
+                const isUnavailable = error.message && (
+                    error.message.includes("503") ||
+                    error.message.includes("unavailable") ||
+                    error.message.includes("429") ||
+                    error.message.includes("overloaded")
+                );
+                if (isUnavailable && i < retries - 1) {
+                    console.warn(`Gemini API unavailable or overloaded. Retrying in ${delayMs}ms... (Attempt ${i + 1} of ${retries})`);
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                    continue;
+                }
+                throw error;
+            }
+        }
+    };
+
     llmService = {
 
         async generateText(prompt, isJson = false) {
@@ -44,27 +65,28 @@ if (provider === "GEMINI") {
                     }
                 });
             }
-            const result = await modelToUse.generateContent(prompt);
-            return result.response.text();
+
+            return await withRetry(async () => {
+                const result = await modelToUse.generateContent(prompt);
+                return result.response.text();
+            }, 3, 3000);
         },
 
         async generateEmbedding(text) {
             if (!text || !text.trim()) return null;
 
-
-
-
             const safeText = text.slice(0, 3000);
 
             try {
-                const result = await embeddingModel.embedContent({
-                    content: {
-                        parts: [{ text: safeText }]
-                    },
-                    outputDimensionality: 768
-                });
-
-                return result.embedding.values;
+                return await withRetry(async () => {
+                    const result = await embeddingModel.embedContent({
+                        content: {
+                            parts: [{ text: safeText }]
+                        },
+                        outputDimensionality: 768
+                    });
+                    return result.embedding.values;
+                }, 3, 2000);
             } catch (err) {
                 console.error("Embedding failed:", err.message);
                 return null;
@@ -79,11 +101,12 @@ if (provider === "GEMINI") {
                     content: { parts: [{ text: t.slice(0, 3000) }] }
                 }));
 
-                const result = await embeddingModel.batchEmbedContents({
-                    requests: requests
-                });
-
-                return result.embeddings.map(e => e.values);
+                return await withRetry(async () => {
+                    const result = await embeddingModel.batchEmbedContents({
+                        requests: requests
+                    });
+                    return result.embeddings.map(e => e.values);
+                }, 3, 2000);
             } catch (err) {
                 console.error("Batch Embedding failed:", err.message);
                 return null;
@@ -101,6 +124,7 @@ if (provider === "OPENAI") {
 
     llmService = {
         async generateText(prompt, isJson = false) {
+
             const payload = {
                 model: "gpt-4o-mini",
                 messages: [{ role: "user", content: prompt }],
@@ -117,6 +141,8 @@ if (provider === "OPENAI") {
         },
 
         async generateEmbedding(text) {
+
+
             const response = await openai.embeddings.create({
                 model: "text-embedding-3-small",
                 input: text
@@ -127,6 +153,8 @@ if (provider === "OPENAI") {
 
         async generateEmbeddingBatch(texts) {
             if (!texts || !texts.length) return [];
+
+
 
             try {
                 const response = await openai.embeddings.create({

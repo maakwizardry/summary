@@ -115,6 +115,7 @@ const subscribtion = async (req, res) => {
         );
 
         const checkoutUrl = response.data.data.attributes.url;
+        // console.log(checkoutUrl);
         res.json({ url: checkoutUrl, status: true });
 
     } catch (error) {

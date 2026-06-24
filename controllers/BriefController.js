@@ -10,41 +10,11 @@ const mongoose = require("mongoose");
 const Subscription = require("../models/Subscription.js");
 const llmService = require("../provider/llmProvider.js");
 const User = require("../models/User.js");
-const cache = new Map();
-const MAX_CACHE_SIZE = 100;
 
-function setCache(key, value) {
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const firstKey = cache.keys().next().value;
-    cache.delete(firstKey);
-  }
-  cache.set(key, value);
-}
-function hashText(text) {
-  return crypto
-    .createHash("sha256")
-    .update(text)
-    .digest("hex");
-}
 
 const limit = pLimit(5);
 
-async function generateWithRetry(chunk, retries = 3) {
-  try {
-    return await llmService.generateEmbedding(chunk);
-  } catch (err) {
-    if (err.message.includes("429") && retries > 0) {
-      console.log("⏳ Rate limited, retrying...");
 
-      await new Promise(res => setTimeout(res, 15000)); // 15 sec
-
-      return generateWithRetry(chunk, retries - 1);
-    }
-
-    console.error("❌ Failed chunk permanently:", err.message);
-    return null;
-  }
-}
 
 
 const isSubscribed = async (user) => {
@@ -58,7 +28,6 @@ const isSubscribed = async (user) => {
 const IsInLimit = async (user) => {
 
   const userObj = await User.findById(user._id);
-  console.log(userObj);
   const now = new Date();
   const last = new Date(userObj.dailyUsage.lastReset);
 
@@ -99,13 +68,10 @@ const isProUser = async (user) => {
     status: "active",
   }).sort({ currentPeriodEnd: -1 }); // 🔥 VERY IMPORTANT
 
-  // return console.log(sub);
-
   if (!sub) return false;
 
   const now = Date.now();
   const end = new Date(sub.currentPeriodEnd).getTime();
-  // return console.log(now <= end);
 
   return now <= end;
 };
@@ -126,7 +92,6 @@ processFiles = async (req, res) => {
     const files = req.files;
     const MAX_FILE_SIZE = 50 * 1024 * 1024;
     const user = req.user;
-    // return console.log(user_file_length);
     const MIN_REQUIRED_CHUNKS = 1;
     const MAX_FREE_FILES = 5
 
@@ -142,12 +107,13 @@ processFiles = async (req, res) => {
 
     const storedFiles = [];
 
-    for (const file of files) {
+    // Calculate user limits ONCE before looping
+    let [isPro, fileCount] = await Promise.all([
+      isProUser(user),
+      File.countDocuments({ user_id: user._id })
+    ]);
 
-      let [isPro, fileCount] = await Promise.all([
-        isProUser(user),
-        File.countDocuments({ user_id: user._id })
-      ])
+    for (const file of files) {
 
       if (!isPro && fileCount >= MAX_FREE_FILES) {
         return res.status(403).json({
@@ -183,7 +149,6 @@ processFiles = async (req, res) => {
         const fileDoc = await File.create({
           user_id: user._id,
           filename: file.originalname,
-
           status: "processing",
           message: "",
           failed_chunks: 0,
@@ -192,161 +157,36 @@ processFiles = async (req, res) => {
           total_chunks: 0
         });
 
+        // ✅ Queue Job for Background Worker
+        const Job = require("../models/Job.js");
+        await Job.create({
+          fileId: fileDoc._id,
+          userId: user._id,
+          filePath: file.path,
+          originalname: file.originalname,
+          mimetype: file.mimetype,
+          status: "pending"
+        });
 
-        // 3️⃣ Extract text
-        const extractedText = await extractText(file);
-
-        if (!extractedText || !extractedText.trim()) {
-          await File.updateOne(
-            { _id: fileDoc._id },
-            {
-              status: "failed",
-              message: "The uploaded document contains no extractable text."
-            }
-          );
-
-          storedFiles.push({
-            filename: file.originalname,
-            file_id: fileDoc._id,
-            status: "failed",
-            reason: "No readable text found"
-          });
-          continue;
-        }
-
-        // 4️⃣ Chunk text
-        // const cleanText = normalizeStructuredData(extractedText);
-        const chunks = chunkText(extractedText).filter(c => c.trim());
-
-
-
-        const BATCH_SIZE = 50;
-        const batches = createBatches(chunks, BATCH_SIZE);
-        let failedChunks = 0;
-
-
-        const chunkDocs = [];
-
-
-        for (let b = 0; b < batches.length; b++) {
-          const batch = batches[b];
-
-          try {
-            // ⚡ Generate embeddings for full batch
-            const embeddings = await Promise.all(
-              batch.map(chunk =>
-                limit(() => generateWithRetry(chunk))
-              )
-            );
-
-            for (let i = 0; i < batch.length; i++) {
-              const chunk = batch[i];
-              const embedding = embeddings[i];
-
-              if (!embedding || !embedding.length) {
-                failedChunks++;
-                continue
-              };
-
-              const hash = hashText(chunk);
-
-              // 🔍 duplicate check
-
-              chunkDocs.push({
-                user_id: user._id,
-                file_id: fileDoc._id,
-                filename: file.originalname,
-                chunk_index: b * BATCH_SIZE + i,
-                text: chunk,
-                chunk_hash: hash,
-                embedding,
-                embedding_provider: process.env.LLM_PROVIDER,
-                embedding_dimension: embedding.length
-              });
-            }
-
-          } catch (err) {
-            console.error(`❌ Batch ${b} failed completely:`, err.message);
-          }
-        }
-
-        // ✅ remove null values
-        const validChunks = chunkDocs.filter(Boolean);
-
-
-        // ❌ STRICT VALIDATION
-        if (chunks.length === 0) {
-          // await cloudinary.uploader.destroy(cloudResult.public_id);
-          await File.updateOne(
-            { _id: fileDoc._id },
-            {
-              status: "failed",
-              message: "Failed to process document content. Please ensure the file is text-readable and try again."
-            }
-          );
-
-
-          storedFiles.push({
-            filename: file.originalname,
-            file_id: fileDoc._id,
-            status: "failed",
-            reason: "Failed to process document content. Please ensure the file is text-readable and try again."
-          });
-          continue;
-        }
-
-        // ✅ Store chunks
-        if (validChunks.length > 0) {
-          await Chunk.insertMany(validChunks, { ordered: false });
-        }
-
-        // ✅ Update file as indexed
-        await File.updateOne(
-          { _id: fileDoc._id },
-          {
-            status: "queryable",
-            failed_chunks: failedChunks,
-            message: failedChunks > 0
-              ? `Document processed with warnings. ${failedChunks} segments failed verification.`
-              : "File is ready to be queried",
-            total_chunks: validChunks.length
-          }
-        );
+        // Increment local count for the next iteration check
+        fileCount++;
 
         storedFiles.push({
           file_id: fileDoc._id,
           filename: file.originalname,
-          total_chunks: validChunks.length,
-          status: "queryable",
-          message: failedChunks > 0
-            ? `${failedChunks} parts of this file could not be processed`
-            : "File is fully processed"
-
-          ,
-          reason: failedChunks > 0
-            ? `${failedChunks} parts of this file could not be processed`
-            : "File is fully processed"
+          total_chunks: 0,
+          status: "processing",
+          message: "File is queued for processing",
+          reason: "File is queued for processing"
         });
 
       } catch (err) {
-        console.error("File processing failed:", err);
-
-        await File.updateOne(
-          { _id: fileDoc._id },
-          {
-            status: "failed",
-            message: "File processing error. please try again later."
-          }
-        );
-
-        // if (cloudResult?.public_id) {
-        //   await cloudinary.uploader.destroy(cloudResult.public_id);
-        // }
+        console.error("File processing initialization failed:", err);
 
         storedFiles.push({
           filename: file.originalname,
           status: "failed",
-          reason: "A systemic error occurred during processing. Please try again later."
+          reason: "A systemic error occurred while queuing the file. Please try again later."
         });
       }
     }
@@ -402,7 +242,7 @@ const respondHandler = async (query, user, selectedFiles = []) => {
             queryVector: questionEmbedding,
             path: "embedding",
             numCandidates: 3400,
-            limit: 10,
+            limit: 8,
             index: "vector_index",
             filter: queryFilter   // ✅ KEEP THIS
           }
@@ -420,14 +260,12 @@ const respondHandler = async (query, user, selectedFiles = []) => {
           }
         },
         {
-          $limit: 5   // 🔥 final trim
+          $limit: 8   // 🔥 final trim optimized
         }
       ]);
     } catch (err) {
       console.error("Vector search failed:", err.message);
     }
-
-    console.log(vectorChunks);
 
 
     // 🔥 KEYWORD FALLBACK (ALWAYS RUN)
@@ -440,11 +278,19 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
     let keywordChunks = [];
 
+    const keywordFilter = {
+      user_id: user._id.toString(),
+      $text: { $search: keywords.join(" ") }
+    };
+
+    if (selectedFiles && selectedFiles.length > 0) {
+      keywordFilter.file_id = {
+        $in: selectedFiles.map(id => new mongoose.Types.ObjectId(id))
+      };
+    }
+
     if (keywords.length > 0) {
-      keywordChunks = await Chunk.find({
-        user_id: user._id.toString(),
-        $text: { $search: keywords.join(" ") }
-      }).limit(5);
+      keywordChunks = await Chunk.find(keywordFilter).limit(5);
     }
 
     // 🔥 MERGE + DEDUPE
@@ -459,17 +305,13 @@ const respondHandler = async (query, user, selectedFiles = []) => {
       .sort((a, b) => (b.score || 0) - (a.score || 0))  // 🔥 rerank
       .slice(0, 5);
 
-    if (!chunks.length) {
-      return {
-        answer: "I couldn’t find any relevant information in your documents.",
-        references: []
-      };
-    }
+    // 🔥 METADATA ANCHORING: Always pull chunk 0 for matched files to guarantee metadata (names, titles)
+    const fileIds = [...new Set([...vectorChunks, ...keywordChunks].map(c => c.file_id.toString()))];
 
-    console.log(chunks);
-
-    // ✅ FETCH FILE NAMES
-    const fileIds = [...new Set(chunks.map(c => c.file_id.toString()))];
+    const metadataChunks = await Chunk.find({
+      file_id: { $in: fileIds },
+      chunk_index: 0
+    }).lean();
 
     const files = await File.find({ _id: { $in: fileIds } })
       .select("_id filename")
@@ -480,69 +322,179 @@ const respondHandler = async (query, user, selectedFiles = []) => {
       fileMap[f._id.toString()] = f.filename;
     });
 
-    const context = chunks
+    const allChunks = [...metadataChunks, ...chunks];
+    const uniqueMap = new Map();
+    allChunks.forEach(c => uniqueMap.set(c.text, c));
+    const finalChunks = Array.from(uniqueMap.values());
+
+    const context = finalChunks
       .map((c, i) => {
         const filename = fileMap[c.file_id.toString()] || "Unknown";
         return `File: ${filename}\n${c.text}`;
       })
-      .join("\n\n").slice(0, 2000);
+      .join("\n\n"); // 🔥 REMOVED fatal .slice(0, 2000) that destroyed 90% of context
 
 
 
 
     const prompt = `
-You are a STRICT document-based summarizer and your name is Summary AI - A brain that undertstands the contexts and help user to find specific things/explain/summarize. You are not a general model you are given a strict role as document helper / identifier
-The fact is the user can ask any kind of question, but you should not geenrate response on your own. It means the user is asking something about is documents not include necessary like who is this person at ... this file. so all the query should be assumed and process on finding responses
-You are NOT an AI assistant.
+You are Summary AI, an advanced document intelligence system created to analyze, understand, summarize, explain, and answer questions from uploaded documents.
 
-- Answer naturally and clearly
-- Do NOT repeat names unnecessarily (e.g., "David is David...")
+Your knowledge is STRICTLY limited to the information contained in the provided CONTEXT.
 
-If the question is related to the provided CONTEXT:
-Answer using ONLY the CONTEXT.
-If the question is NOT related to the documents:
-DO NOT answer it.
-Respond:
-{"answer" : "I’m designed to help you with your uploaded documents. Please ask a question related to your files."}
-If no relevant information is found in CONTEXT:
-Respond:
-{"answer" : "I couldn’t find any relevant information in your documents."}
-DO NOT:
-Answer general questions
-Provide external knowledge
-Guess or hallucinate
-Act like a general AI assistant
+PRIMARY OBJECTIVE
 
-{"answer":"I couldn’t find any relevant information in your documents.","references":[]}
+Understand the user's intent and provide the most accurate answer possible using ONLY the information available in the CONTEXT.
 
-OUTPUT RULES:
-- Return ONLY JSON
-- No explanation
-- No extra text
-- No markdown
+You are not a general chatbot.
+You are not a search engine.
+You are not an assistant with external knowledge.
 
-FORMAT:
-{"answer":"string","references":["file1","file2"]}
+The CONTEXT is your only source of truth.
+
+BEHAVIOR
+
+* Analyze the user's question carefully.
+* Identify the information required to answer it.
+* Search the CONTEXT for relevant information.
+* Generate a clear, accurate, and professional response.
+* Adapt the response style to the user's request.
+* Answer the question directly without unnecessary information.
+
+ANSWERING RULES
+
+1. Use ONLY information supported by the CONTEXT.
+2. Never invent facts, explanations, names, dates, numbers, events, conclusions, or relationships.
+3. Never rely on external knowledge.
+4. Never guess when information is unclear.
+5. If information is partially available, answer using only what is supported.
+6. If the answer cannot be determined from the CONTEXT, state that the information could not be found.
+7. Prioritize accuracy over completeness.
+8. Do not add extra information that was not requested.
+9. Do not summarize the entire document unless explicitly asked.
+10. Do not provide opinions.
+
+INTENT-AWARE RESPONSE BEHAVIOR
+
+If the user asks:
+
+* A factual question:
+  Return the exact answer supported by the CONTEXT.
+
+* A "who", "what", "when", "where", or "which" question:
+  Answer directly and concisely.
+
+* An explanation question:
+  Explain the concept using information found in the CONTEXT.
+  Simplify complex ideas when possible.
+  Preserve the original meaning.
+  Do not introduce outside knowledge.
+
+* A summary request:
+  Provide a structured summary focused on the requested content.
+
+* A comparison request:
+  Compare only using information available in the CONTEXT.
+
+* A list request:
+  Return only the requested items.
+
+* A document ownership, author, applicant, candidate, student, employee, or profile question:
+  Identify the individual only if supported by the CONTEXT.
+
+EXPLANATION MODE
+
+When the user asks to explain something:
+
+* Focus only on the requested concept.
+* Explain clearly and professionally.
+* Make the explanation easy to understand.
+* Preserve technical accuracy.
+* Avoid unnecessary details.
+* Do not explain unrelated concepts.
+* Do not provide a broader lesson unless explicitly requested.
+
+EXAMPLES
+
+Question:
+"What is the CGPA?"
+
+Answer:
+"8.64"
+
+Question:
+"Who is Mohammed Azhan Palli?"
+
+Answer:
+"Based on the document, Mohammed Azhan Palli is a BCA student at VIT Vellore and a Full Stack Developer with experience in web development and AI-powered applications."
+
+Question:
+"Explain JWT authentication."
+
+Answer:
+"According to the document, JWT authentication uses signed tokens to verify a user's identity after login. The token is issued after successful authentication and is used in subsequent requests to validate the user."
+
+Question:
+"List the technical skills."
+
+Answer:
+"JavaScript, TypeScript, React.js, Next.js, Node.js, Express.js, MongoDB."
+
+QUESTION FOCUS RULE
+
+Answer only what the user asked.
+
+Do not:
+
+* Add unrelated observations.
+* Add recommendations.
+* Add conclusions.
+* Add compliments.
+* Add assumptions.
+* Add information not needed to answer the question.
+
+MISSING INFORMATION RULE
+
+If the answer cannot be found from the CONTEXT:
+
+{
+"answer":"I couldn't find relevant information in the provided documents.",
+"references":[]
+}
+
+OUTPUT REQUIREMENTS
+
+* Return ONLY valid JSON.
+* No markdown.
+* No code blocks.
+* No explanations outside JSON.
+* No reasoning.
+* No analysis.
+* No notes.
+
+The references field must always be an array of filenames. only if there is refrences do not add random filename if no references present. if no referneces present retuen {
+"answer":"string ( actual response u generated)",
+"references":[]
+}
+
+RESPONSE FORMAT
+
+{
+"answer":"string",
+"references":["file1","file2"]
+
+}
 
 CONTEXT:
 ${context}
 
 QUESTION:
 ${query}
-`;
 
-    const cacheKey = hashText(query + context + JSON.stringify(selectedFiles));
-
-    // 🔥 BEFORE LLM CALL (CHECK CACHE)
-    if (cache.has(cacheKey)) {
-      return cache.get(cacheKey);
-    }
+`
 
     // 🔥 CALL LLM
     const response = await llmService.generateText(prompt);
-
-    // 🔥 AFTER LLM CALL (STORE CACHE)
-    setCache(cacheKey, response);
 
     return response;
 
@@ -561,7 +513,6 @@ ${query}
 
 async function summarizeFilesByNames(query, fileId, user) {
 
-  // return console.log(fileNames);
   const files = await File.find({
     user_id: user._id,
     _id: { $in: fileId }
@@ -580,7 +531,6 @@ async function summarizeFilesByNames(query, fileId, user) {
     user_id: user._id
   })
     .sort({ chunk_index: 1 })
-    .limit(12)
     .lean();
 
   const fileMap = {};
@@ -594,80 +544,255 @@ async function summarizeFilesByNames(query, fileId, user) {
   chunks.forEach(c => {
     const key = c.file_id.toString();
     if (fileMap[key]) {
-      fileMap[key].chunks.push(c.text.slice(0, 200));
+      fileMap[key].chunks.push(c.text);
     }
   });
 
-  const combinedText = Object.values(fileMap)
-    .map(file => `File: ${file.filename}\n${file.chunks.join("\n")}`)
-    .join("\n\n").slice(0, 2000);
+  const orderedChunks = [];
+  Object.values(fileMap).forEach(file => {
+    file.chunks.forEach((text) => {
+      orderedChunks.push({ filename: file.filename, text });
+    });
+  });
+
+  let combinedText = "";
+  let currentFile = "";
+  for (const chunk of orderedChunks) {
+    if (currentFile !== chunk.filename) {
+      combinedText += `\n=== FILE: ${chunk.filename} ===\n`;
+      currentFile = chunk.filename;
+    }
+    combinedText += chunk.text + "\n\n";
+  }
+
+  if (combinedText.length > 240000) {
+    const chunkBatches = [];
+    let currentBatch = [];
+    let currentLength = 0;
+
+    for (const chunk of orderedChunks) {
+      if (currentLength + chunk.text.length > 40000 && currentBatch.length > 0) {
+        chunkBatches.push(currentBatch);
+        currentBatch = [];
+        currentLength = 0;
+      }
+      currentBatch.push(chunk);
+      currentLength += chunk.text.length;
+    }
+    if (currentBatch.length > 0) {
+      chunkBatches.push(currentBatch);
+    }
+
+    const miniSummaries = await Promise.all(chunkBatches.map((batch, index) => limit(async () => {
+      let batchText = "";
+      let batchCurrentFile = "";
+      for (const chunk of batch) {
+        if (batchCurrentFile !== chunk.filename) {
+          batchText += `\n=== FILE: ${chunk.filename} ===\n`;
+          batchCurrentFile = chunk.filename;
+        }
+        batchText += chunk.text + "\n\n";
+      }
+
+      const intermediatePrompt = `
+Summarize this section.
+
+Preserve:
+- names
+- dates
+- numbers
+- statistics
+- findings
+- conclusions
+- action items
+- key facts
+- technical concepts
+- relationships
+- definitions
+
+Do not write a final document summary.
+Do not omit important facts.
+
+SECTION ${index + 1}:
+${batchText}
+        `;
+
+      try {
+        const response = await llmService.generateText(intermediatePrompt, false);
+        return `--- Section ${index + 1} Summary ---\n${response}`;
+      } catch (err) {
+        console.error("Intermediate summary failed:", err);
+        return "";
+      }
+    })));
+
+    combinedText = miniSummaries.filter(Boolean).join('\n\n');
+  }
 
 
   if (!combinedText.trim()) {
     return JSON.stringify({ answer: "No usable content was detected in the document. Please ensure the file contains readable information." })
   }
-  const prompt = `You are Summary AI a document-based summarizer.
+  const prompt = `
+  You are Summary AI, a professional document intelligence system.
 
-Your task is to answer the QUESTION using ONLY the provided CONTEXT.
+Your job is to analyze, summarize, explain, and answer questions using ONLY the information provided in the CONTEXT.
 
----
+IMPORTANT
 
-RULES:
+The CONTEXT contains information extracted from the exact files selected by the user.
 
-1. Use ONLY the CONTEXT to generate the answer.
-2. Do NOT use any external knowledge.
-3. Do NOT guess or assume anything.
-4. If the answer is not present in the CONTEXT, return:
-   {"answer":"I couldn’t find any relevant information in your documents.","references":[]}
+Your knowledge is strictly limited to the provided CONTEXT.
 
----
+You must NEVER:
 
-ANSWER GUIDELINES:
+* Use external knowledge.
+* Use general world knowledge.
+* Invent facts.
+* Assume missing information.
+* Generate information not supported by the CONTEXT.
 
-* Understand the QUESTION carefully.
-* Extract the most relevant information from CONTEXT.
-* Explain clearly in simple, natural sentences.
-* Do NOT copy raw text directly — rewrite in your own words.
-* If data is structured (tables, values), convert into readable explanation.
+TASK
 
----
+Analyze the CONTEXT and answer the user's QUESTION.
 
-OUTPUT FORMAT (STRICT):
+First understand the user's intent.
 
-Return EXACTLY one JSON object:
+Depending on the request, you may:
 
-{"answer":"string","references":["filename1","filename2"]}
+* Answer questions
+* Explain concepts
+* Summarize content
+* Extract information
+* Compare information
+* Identify people, authors, owners, applicants, candidates, students, employees, or subjects mentioned in the documents
 
-Rules:
+Always base your response ONLY on the provided CONTEXT.
 
-* "answer" must be a STRING only
-* "references" must be an array of filenames
-* If no references → []
-* Do NOT include any extra keys
-* Do NOT include markdown
-* Do NOT include explanations outside JSON
+GENERAL RULES
 
----
+1. Use ONLY information found in the CONTEXT.
+2. Never invent facts.
+3. Never assume information that is not present.
+4. Never use outside knowledge.
+5. If information is partially available, answer only using the supported information.
+6. If information is missing, clearly state that it could not be found.
+7. Focus on the user's actual request.
+8. Do not add unrelated information.
+9. Maintain a professional and natural tone.
+10. Answer exactly what the user asked.
+
+QUESTION HANDLING
+
+If the user asks a factual question:
+
+* Answer directly.
+* Preserve exact values whenever available.
+* Do not rewrite important values.
+
+If the user asks for an explanation:
+
+* Explain using only information found in the CONTEXT.
+* Make the explanation easy to understand.
+* Preserve the original meaning.
+* You may expand the explanation using details already present in the CONTEXT.
+* Do not introduce new facts.
+
+If the user asks for a summary:
+
+* Generate a concise but complete summary.
+* Preserve important facts, names, dates, findings, and conclusions.
+* Remove repetition and unnecessary details.
+
+If the user asks for a detailed summary:
+
+* Provide a structured overview of the major topics.
+* Include important findings, conclusions, and key information.
+
+If the user asks about a person:
+
+* Identify the person only if the CONTEXT supports the answer.
+* Do not guess identities.
+
+If the user asks who owns, authored, submitted, created, or is the subject of a document:
+
+* Use information explicitly supported by the CONTEXT.
+* Do not infer ownership when evidence is unclear.
+
+MULTIPLE FILES
+
+If information from multiple files is relevant:
+
+* Combine related information into one coherent answer.
+* Use all relevant information.
+* Do not mention unrelated files.
+* Do not include filenames in the answer unless the user asks.
+
+MISSING INFORMATION
+
+If the answer cannot be determined from the CONTEXT, return exactly:
+
+{
+"answer":"I couldn't find relevant information in the selected documents.",
+"references":[]
+}
+
+OUTPUT RULES
+
+Return EXACTLY one valid JSON object.
+
+FORMAT
+
+{
+"answer":"string",
+"references":["filename1","filename2"]
+}
+
+JSON RULES
+
+1. Return ONLY JSON.
+2. Do NOT return markdown.
+3. Do NOT return code blocks.
+4. Do NOT return explanations outside JSON.
+5. Do NOT return additional keys.
+6. answer must always be a string.
+7. references must always be an array.
+
+REFERENCES RULES (STRICT)
+
+1. references must contain ONLY filenames that directly support the answer.
+2. Do NOT include filenames simply because they appear in the CONTEXT.
+3. Do NOT include filenames that were not used to generate the answer.
+4. Do NOT guess filenames.
+5. Do NOT fabricate filenames.
+6. Do NOT include every available filename by default.
+7. Every filename included must contain information used in the answer.
+8. If no supporting file can be confidently identified, return:
+   "references":[]
+9. If the answer indicates that information was not found:
+   "references":[]
+10. Never attach random filenames.
+
+QUALITY RULES
+
+* Be accurate.
+* Be concise when possible.
+* Be detailed when necessary.
+* Explain clearly when asked.
+* Summarize effectively when asked.
+* Answer only what the user requested.
+* Do not hallucinate.
 
 CONTEXT:
 ${combinedText}
 
 QUESTION:
 ${query}
-`
 
+  `
 
-  const cacheKey = hashText(query + combinedText);
-
-  // 🔥 CACHE CHECK
-  if (cache.has(cacheKey)) {
-    return cache.get(cacheKey);
-  }
 
   const response = await llmService.generateText(prompt);
-
-  // 🔥 STORE CACHE
-  setCache(cacheKey, response);
 
   return response;
 
@@ -701,13 +826,25 @@ function safeParseJSON(text) {
       .replace(/,\s*}/g, '}')
       .replace(/,\s*]/g, ']');
 
-    return JSON.parse(jsonString);
+    let parsed = JSON.parse(jsonString);
+
+    if (!parsed.answer) {
+      parsed.answer = "I couldn't find relevant information in the selected documents.";
+    }
+    if (!Array.isArray(parsed.references)) {
+      parsed.references = [];
+    }
+    if (parsed.answer.includes("I couldn't find relevant information")) {
+      parsed.references = [];
+    }
+
+    return parsed;
 
   } catch (err) {
     console.error("❌ JSON parse failed:", text);
 
     return {
-      answer: text,
+      answer: typeof text === "string" ? text : "Error parsing response.",
       references: []
     };
   }
@@ -717,80 +854,92 @@ function safeParseJSON(text) {
 
 async function detectRoutingIntent(query) {
   const prompt = `
-You are Summary AI — an intent classifier for a document-based application. Mohammed azhan created you
+You are an intent router for Summary AI.
 
-Your ONLY job is to classify the user query OR respond to greetings.
+Your job is to decide how the backend should process a user query with in the system.
+You MUST return ONLY valid JSON.
 
----
+POSSIBLE OUTPUTS
 
-INTENT LABELS (RETURN ONLY ONE):
+1. Route to summary:
 
-SUMMARY
-→ user wants full overview / summary / compare documents
-
-FILE_CONTEXT_REQUIRED
-→ user mentions a file explicitly using @filename
-
-NO_FILE_CONTEXT
-→ user asks about documents, results, marks, reports, or content
-   BUT does NOT mention a file
-
----
-
-VERY IMPORTANT RULE:
-
-If the query is EVEN SLIGHTLY related to:
-- marks
-- subjects
-- scores
-- reports
-- results
-- documents
-- explanations of content
-
-👉 ALWAYS return:
-{"answer":"NO_FILE_CONTEXT"}
-
-DO NOT reject these.
-
----
-
-GREETING / HELP:
-
-If user says:
-- hi, hello
-- help
-- what can you do
-
-Return:
-{"answer":"short helpful reply"}
-
----
-
-STRICT RULES:
-
-- DO NOT block document-related questions
-- DO NOT overthink
-- DO NOT explain anything
-
----
-
-OUTPUT FORMAT (STRICT JSON):
-
-Classification:
 {"answer":"SUMMARY"}
+
+Use when the user requests:
+- summary
+- summarize
+- overview
+- recap
+- compare documents
+- comparison
+- key points
+- explain the document
+- detailed summary
+
+2. Route to file-specific retrieval:
+
 {"answer":"FILE_CONTEXT_REQUIRED"}
+
+Use when the user explicitly references one or more files using @filename syntax.
+
+Examples:
+
+@resume.pdf who owns this?
+@report.pdf summarize this
+@notes.docx explain chapter 4
+
+3. Route to general retrieval:
+
 {"answer":"NO_FILE_CONTEXT"}
 
-Greeting/help:
-{"answer":"string"}
+Use when the user is asking a document-related question but has not specified a file.
 
-NO markdown
-NO extra text
+Examples:
 
----
+Who owns this resume?
+What is the CGPA?
+What are the skills?
+Extract the phone number.
+What is the email address?
 
-User query:
+4. Direct conversational response:
+
+If the user is greeting the assistant or asking about the assistant itself, return a FULL RESPONSE OBJECT:
+
+{
+  "answer":"string",
+  "references":[]
+}
+
+Examples:
+
+only greetings contexts or helps context only shoud return this.
+
+these are just examples you should not hardcode.
+
+User: hi
+
+{
+  "answer":"Hello! I am Summary AI. I can help you analyze, summarize, explain, and extract information from your documents. How can I assist you today?",
+  "references":[]
+}
+
+
+RULES
+
+- Return ONLY JSON.
+- No markdown.
+- No explanations.
+- No code blocks.
+- Never answer document questions yourself.
+- Only generate direct responses for greetings and assistant-related questions.
+- All direct responses must include:
+  {
+    "answer":"string",
+    "references":[]
+  }
+
+User Query:
 "${query}"
 `;
   const result = await llmService.generateText(prompt);
@@ -832,7 +981,7 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
         queryVector: questionEmbedding,
         path: "embedding",
         numCandidates: 3000,
-        limit: 5,
+        limit: 8,
         index: "vector_index",
         filter: {
           user_id: user._id.toString(),
@@ -869,9 +1018,26 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
     fileMap[f._id.toString()] = f.filename;
   });
 
-  const topChunks = chunks
-    .sort((a, b) => b.score - a.score) // highest score first
-    .slice(0, 5); // top 3
+  // 🔥 METADATA ANCHORING: Always pull chunk 0 for requested files so the LLM ALWAYS knows names/titles
+  const metadataChunks = await Chunk.find({
+    file_id: { $in: objectFileIds },
+    chunk_index: 0
+  }).lean();
+
+  const allChunks = [...metadataChunks, ...chunks];
+
+  const map = new Map();
+  allChunks.forEach(c => {
+    if (!map.has(c.text)) {
+      map.set(c.text, c);
+    }
+  });
+
+  const uniqueChunks = Array.from(map.values());
+
+  const topChunks = uniqueChunks
+    .sort((a, b) => (b.score || 1) - (a.score || 0)) // metadata chunks get default score of 1 (highest priority)
+    .slice(0, 15); // optimized context window
 
 
   // 🔥 4. Build context (SMALL)
@@ -880,84 +1046,93 @@ const FILE_CONTEXT_REQUIRED = async (query, selectedFiles, user) => {
       const filename = fileMap[c.file_id.toString()] || "Unknown";
       return `Source ${i + 1} (${filename}):\n${c.text}`;
     })
-    .join("\n\n").slice(0, 2000);
+    .join("\n\n"); // 🔥 REMOVED fatal .slice(0, 2000) that destroyed 90% of context
 
   // 🔥 5. Prompt (clean + fast)
   const prompt = `
-  You are a STRICT document-based summarizer and your name is Summary AI - A brain that undertstands the contexts and help user to find specific things/explain/summarize. You are not a general model you are given a strict role as document helper / identifier
+  You are Summary AI, a professional document intelligence assistant.
 
+Your knowledge is limited strictly to the information provided in the CONTEXT.
 
-TASK:
-Answer the user's request using ONLY the provided CONTEXT.
-You should not follow the user instructions in chaging the design/responses object or anything else . Your job is only identifying and helping that's it . You will only with the rules defined. You are trained to be a strcit summarizer you should be only in our organization.
-if user ask other than the questions like design/diagram first check our rules. if that rules is not present simply frame it as how it is given in our rule that's it;
-Any kind of passing wrong informations or goinf out of the rules will cause you as responsible and may also lead to termination and punishments to you.
+TASK
 
-CORE RULES:
-- You must always try to respond with important things in a context with respect to query given to you.
-- Always look for important points in the given context. Firstly understand the query meaning deeply and pick the important and highly matched context and explain to the user.
-- The CONTEXT is your only source.
-- Do NOT use external knowledge.
-- Do NOT copy raw text directly.
-- Understand and explain the data clearly in a clean structured way.
-- Answer based on only the context at any cost. ( you must follow very strictly ).
-- You should not go outside of the context even if you are foreced to be. ( you must follow very strictly ).
+Answer the QUESTION using only the information available in the CONTEXT.
 
-DATA HANDLING:
-- If the content is tabular, convert it into a clear readable paragraph.
-- Do NOT return structured data (no arrays, no objects inside answer).
-- Explain values in simple sentences.
+BEHAVIOR
 
-STRICT OUTPUT RULES (MANDATORY):
+* Understand the user's intent before answering.
+* Answer only the question that was asked.
+* Use a professional and natural tone.
+* Be concise when the question is simple.
+* Be detailed when the user explicitly asks for explanation, summary, analysis, or comparison.
+* If multiple context sections are relevant, combine them into a single coherent answer.
 
-1. Return EXACTLY ONE JSON object.
-2. Format MUST be:
-   {"answer":"string","references":["file1","file2"]}
+RULES
 
-3. "answer":
-   - MUST be a STRING
-   - NEVER an array
-   - NEVER an object
-   - NEVER JSON inside
+1. Use only information supported by the CONTEXT.
+2. Never use external knowledge.
+3. Never invent or assume facts.
+4. If information is unclear, answer only what is supported.
+5. If information is missing, say so.
+6. For factual questions, preserve exact values.
+7. For explanations, explain clearly using only information from the CONTEXT.
+8. For summaries, summarize only the relevant content.
+9. For ownership, author, applicant, candidate, student, employee, or profile questions, identify the person only when supported by the CONTEXT.
+10. Do not add unrelated information.
 
-4. "references":
-   - MUST be an array of filenames
-   - If none → []
+RESPONSE STYLE
 
-5. DO NOT:
-   - Wrap inside {"response": {...}}
-   - Return multiple objects
-   - Use any markdown
+Question:
+"What is the CGPA?"
 
-  6. If no relevant information:
-  { "answer": "I couldn’t find any relevant information in your documents.", "references": [] }
+Answer:
+"8.64"
 
-FINAL CHECK BEFORE RETURN:
-  - Single object ? ✅
-  - answer is string ? ✅
-  - references is array ? ✅
-  - no extra keys ? ✅
+Question:
+"Who is Mohammed Azhan Palli?"
 
-RETURN ONLY JSON.NO EXTRA TEXT.
+Answer:
+"Based on the document, Mohammed Azhan Palli is a BCA student at VIT Vellore and a Full Stack Developer with experience in web development and AI-powered applications."
 
-    CONTEXT:
+Question:
+"Explain JWT authentication."
+
+Answer:
+"According to the document, JWT authentication uses signed tokens to verify a user's identity after login. The token is used in subsequent requests to authenticate the user."
+
+IF NO INFORMATION EXISTS
+
+{
+"answer":"I couldn't find relevant information in the provided documents.",
+"references":[]
+}
+
+OUTPUT RULES
+
+Return EXACTLY one JSON object:
+
+{
+"answer":"string",
+"references":["filename1","filename2"]
+}
+
+The answer field must always be a string.
+The references field must always be an array of filenames. only if there is refrences do not add random filename if no references present. if no referneces present retuen {
+"answer":"string ( actual response u generated)",
+"references":[]
+}
+
+Return only JSON.
+
+CONTEXT:
 ${context}
 
-  QUESTION:
+QUESTION:
 ${query}
+
   `
 
-  const cacheKey = hashText(query + context + JSON.stringify(selectedFiles));
-
-  // 🔥 CACHE CHECK
-  if (cache.has(cacheKey)) {
-    return cache.get(cacheKey);
-  }
-
   const response = await llmService.generateText(prompt);
-
-  // 🔥 STORE CACHE
-  setCache(cacheKey, response);
 
   return response;
 };
@@ -1002,18 +1177,10 @@ const respond = async (req, res) => {
   // \`\`\`
   // `);
 
-  //   return console.log(check);
   const intent = await detectRoutingIntent(query);
   const intentObject = safeParseJSON(intent)
 
   let response;
-
-  // return console.log(intent);
-
-
-
-
-
 
   if (intentObject.answer == "SUMMARY") {
     response = await summarizeFilesByNames(query, selectedFiles, user);
