@@ -3,7 +3,6 @@ const User = require("../models/User");
 
 const getSubscriptions = async (req, res) => {
     const userId = req.user._id;
-    console.log(userId);
     try {
         const subscription = await Subscription.find({ userId: userId }).select("plan status startDate currentPeriodEnd variantName customerPortalUrl").sort({ createdAt: -1 });
         if (!subscription) {

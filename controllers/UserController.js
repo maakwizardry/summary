@@ -169,7 +169,6 @@ const getUserProfile = async (req, res) => {
 
   try {
     const user = await User.findById(req.user._id);
-    console.log(user);
 
     return res.status(200).json({
       id: user._id,
@@ -258,7 +257,7 @@ const Google = async (req, res) => {
     });
 
     const payload = ticket.getPayload();
-    const { email, email_verified, sub: googleId } = payload;
+    const { email, email_verified, sub: googleId, name } = payload;
 
     if (!email || !email_verified) {
       return res.status(401).json({ message: "Please verify your google account to continue" });
@@ -286,6 +285,7 @@ const Google = async (req, res) => {
     // 4️⃣ Create new Google user if not exists
     if (!user) {
       user = await User.create({
+        username: name,
         email,
         googleId,
         authProvider: "google",
@@ -315,9 +315,7 @@ const Google = async (req, res) => {
 
     return res.status(200).json({
       token: appToken,
-      email: user.email,
-      userId: user._id,
-      status: true,
+      username: user.username,
     });
 
   } catch (err) {
