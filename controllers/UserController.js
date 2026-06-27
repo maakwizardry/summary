@@ -143,7 +143,7 @@ const verifyUser = async (req, res) => {
     user.emailVerifyToken = null;
     user.emailVerifyExpires = null;
     await user.save();
-    const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.FRONTEND_URL}/summary` });
+    const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.FRONTEND_URL}/dashboard` });
     if (status) {
       console.log("Welcome email sent successfully");
     }
