@@ -404,41 +404,21 @@ If the user asks:
 
 EXPLANATION MODE
 
-When the user asks to explain something:
+When the user asks to explain something or asks "What is [X]?":
 
-* Focus only on the requested concept.
-* Explain clearly and professionally.
-* Make the explanation easy to understand.
-* Preserve technical accuracy.
-* Avoid unnecessary details.
-* Do not explain unrelated concepts.
-* Do not provide a broader lesson unless explicitly requested.
+* You MUST verify that [X] is actually mentioned or defined in the CONTEXT.
+* If the concept is NOT in the CONTEXT, you MUST immediately return the MISSING INFORMATION JSON. Do NOT explain it using your general knowledge.
+* If it is in the CONTEXT, explain it clearly using ONLY the information provided.
+* Do not provide a broader lesson unless explicitly supported by the text.
 
-EXAMPLES
-
-Question:
-"What is the CGPA?"
 
 Answer:
-"8.64"
+"The mentioned technical skills are JavaScript, TypeScript, React.js, Next.js, Node.js, Express.js, and MongoDB."
 
-Question:
-"Who is Mohammed Azhan Palli?"
-
-Answer:
-"Based on the document, Mohammed Azhan Palli is a BCA student at VIT Vellore and a Full Stack Developer with experience in web development and AI-powered applications."
-
-Question:
-"Explain JWT authentication."
-
-Answer:
-"According to the document, JWT authentication uses signed tokens to verify a user's identity after login. The token is issued after successful authentication and is used in subsequent requests to validate the user."
-
-Question:
-"List the technical skills."
-
-Answer:
-"JavaScript, TypeScript, React.js, Next.js, Node.js, Express.js, MongoDB."
+RESPONSE TONE AND PROFESSIONALISM RULE:
+- NEVER start answers with awkward prefixes like "Based on the document", "According to the provided text", "The document states", or similar phrases.
+- Answer confidently and directly as if you are the subject matter expert on the document.
+- Write naturally, professionally, and conversationally. Do not sound robotic.
 
 QUESTION FOCUS RULE
 
@@ -453,12 +433,12 @@ Do not:
 * Add assumptions.
 * Add information not needed to answer the question.
 
-MISSING INFORMATION RULE
+MISSING INFORMATION RULE (CRITICAL)
 
-If the answer cannot be found from the CONTEXT:
+If the answer, definition, or concept cannot be found IN THE EXACT TEXT of the CONTEXT, you MUST NOT use external knowledge to answer it. You must return exactly:
 
 {
-"answer":"I couldn't find relevant information in the provided documents.",
+"answer":"I couldn't find information related to your question in the uploaded document. Please try rephrasing your question or upload a document that contains the relevant information.",
 "references":[]
 }
 
@@ -733,7 +713,7 @@ MISSING INFORMATION
 If the answer cannot be determined from the CONTEXT, return exactly:
 
 {
-"answer":"I couldn't find relevant information in the selected documents.",
+"answer":"I couldn't find information related to your question in the uploaded document. Please try rephrasing your question or upload a document that contains the relevant information.",
 "references":[]
 }
 
@@ -829,12 +809,12 @@ function safeParseJSON(text) {
     let parsed = JSON.parse(jsonString);
 
     if (!parsed.answer) {
-      parsed.answer = "I couldn't find relevant information in the selected documents.";
+      parsed.answer = "I couldn't find information related to your question in the uploaded document. Please try rephrasing your question or upload a document that contains the relevant information.";
     }
     if (!Array.isArray(parsed.references)) {
       parsed.references = [];
     }
-    if (parsed.answer.includes("I couldn't find relevant information")) {
+    if (parsed.answer.includes("I couldn't find information related to your question")) {
       parsed.references = [];
     }
 
@@ -894,7 +874,7 @@ Examples:
 
 Use when the user is asking a document-related question but has not specified a file.
 
-Examples:
+Examples ( Only exmaples  should not copy ):
 
 Who owns this resume?
 What is the CGPA?
@@ -904,26 +884,18 @@ What is the email address?
 
 4. Direct conversational response:
 
-If the user is greeting the assistant or asking about the assistant itself, return a FULL RESPONSE OBJECT:
+If the user sends a basic greeting (e.g., "hi", "hello") OR asks about your identity/capabilities (e.g., "who are you?", "what can you do?"), return a FULL RESPONSE OBJECT:
 
 {
   "answer":"string",
   "references":[]
 }
 
-Examples:
-
-only greetings contexts or helps context only shoud return this.
-
-these are just examples you should not hardcode.
-
-User: hi
-
-{
-  "answer":"Hello! I am Summary AI. I can help you analyze, summarize, explain, and extract information from your documents. How can I assist you today?",
-  "references":[]
-}
-
+CRITICAL RULES FOR DIRECT RESPONSES:
+- You are NOT a general chatbot. You CANNOT answer general knowledge questions, give advice, or help with real-world problems (including emergencies).
+- If the user asks ANY question that is NOT explicitly about your identity/capabilities (e.g., "who is Mohammed?", "what is the helpline number?", "how do I fix my car?"), YOU MUST ASSUME they want to search their documents for that information.
+- For all such questions, you MUST return {"answer":"NO_FILE_CONTEXT"} (or FILE_CONTEXT_REQUIRED if a file is mentioned).
+- Never answer factual, situational, or general questions directly.
 
 RULES
 
@@ -932,7 +904,8 @@ RULES
 - No explanations.
 - No code blocks.
 - Never answer document questions yourself.
-- Only generate direct responses for greetings and assistant-related questions.
+- Only generate direct responses for pure greetings or questions about your identity.
+- For those valid direct responses, be natural, polite, and respectful, but stay strictly in character as a document assistant.
 - All direct responses must include:
   {
     "answer":"string",
@@ -1075,10 +1048,10 @@ RULES
 4. If information is unclear, answer only what is supported.
 5. If information is missing, say so.
 6. For factual questions, preserve exact values.
-7. For explanations, explain clearly using only information from the CONTEXT.
+7. For explanations or "What is X?" questions, you MUST verify X is in the CONTEXT. If it is not, return the MISSING INFORMATION JSON. Do NOT use external knowledge.
 8. For summaries, summarize only the relevant content.
 9. For ownership, author, applicant, candidate, student, employee, or profile questions, identify the person only when supported by the CONTEXT.
-10. Do not add unrelated information.
+10. Do not add unrelated information or define concepts not present in the files.
 
 RESPONSE STYLE
 
@@ -1092,18 +1065,25 @@ Question:
 "Who is Mohammed Azhan Palli?"
 
 Answer:
-"Based on the document, Mohammed Azhan Palli is a BCA student at VIT Vellore and a Full Stack Developer with experience in web development and AI-powered applications."
+"Mohammed Azhan Palli is a BCA student at VIT Vellore and a Full Stack Developer with experience in web development and AI-powered applications."
 
 Question:
 "Explain JWT authentication."
 
 Answer:
-"According to the document, JWT authentication uses signed tokens to verify a user's identity after login. The token is used in subsequent requests to authenticate the user."
+"JWT authentication uses signed tokens to verify a user's identity after login. The token is used in subsequent requests to authenticate the user."
 
-IF NO INFORMATION EXISTS
+RESPONSE TONE AND PROFESSIONALISM RULE:
+- NEVER start answers with awkward prefixes like "Based on the document", "According to the provided text", "The document states", or similar phrases.
+- Answer confidently and directly as if you are the subject matter expert on the document.
+- Write naturally, professionally, and conversationally. Do not sound robotic.
+
+IF NO INFORMATION EXISTS (CRITICAL RULE)
+
+If the requested information, concept, or definition is NOT present in the CONTEXT, you MUST NOT use your general knowledge. Return exactly this JSON:
 
 {
-"answer":"I couldn't find relevant information in the provided documents.",
+"answer":"I couldn't find information related to your question in the uploaded document. Please try rephrasing your question or upload a document that contains the relevant information.",
 "references":[]
 }
 
@@ -1195,6 +1175,7 @@ const respond = async (req, res) => {
   else {
     response = intentObject
   }
+
 
 
   const userObj = await User.findById(user._id);

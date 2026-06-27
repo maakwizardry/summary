@@ -295,7 +295,7 @@ const Google = async (req, res) => {
       });
 
 
-      const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.FRONTEND_URL}/summary` });
+      const status = await sendMail({ to: user.email, name: user.username, type: "welcome", url: `${process.env.FRONTEND_URL}/dashboard` });
       if (status) {
         console.log("Welcome email sent successfully");
       }
