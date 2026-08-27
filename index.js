@@ -1,6 +1,16 @@
 // index.js
 const express = require("express");
 const dotenv = require("dotenv");
+
+// Load env variables
+const envFile =
+  process.env.NODE_ENV === "production"
+    ? ".env.prod"
+    : ".env.dev";
+
+dotenv.config({ path: envFile });
+
+
 const cors = require("cors");
 const morgan = require("morgan");
 const UserRouter = require("./routes/userRoute");
@@ -18,8 +28,7 @@ const Subscription = require('./models/Subscription');
 
 
 
-// Load env variables
-dotenv.config();
+
 
 
 // Initialize app

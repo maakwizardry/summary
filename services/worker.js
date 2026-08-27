@@ -54,7 +54,6 @@ async function processJob(job) {
 
     // 3️⃣ Extract text
     const extractedText = await extractText(file);
-    // return console.log(extractedText)
 
     if (!extractedText || !extractedText.trim()) {
       await File.updateOne(
@@ -66,7 +65,6 @@ async function processJob(job) {
 
     // 4️⃣ Chunk text
     const chunks = chunkText(extractedText).filter(c => c.trim());
-    // return console.log(chunks);
 
     if (chunks.length === 0) {
       await File.updateOne(
@@ -153,9 +151,30 @@ async function processJob(job) {
     );
   } finally {
     // Delete temp file
-    if (fs.existsSync(job.filePath)) {
+    if (job.filePath && fs.existsSync(job.filePath)) {
       fs.unlinkSync(job.filePath);
     }
+  }
+}
+
+async function deleteJob(job) {
+  try {
+    console.log(`[Worker] Deleting file ${job.fileId}`);
+
+    // Delete all related chunks
+    await Chunk.deleteMany({ file_id: job.fileId });
+
+    // Delete file record
+    await File.deleteOne({ _id: job.fileId });
+
+    job.status = "completed";
+    await job.save();
+    console.log(`[Worker] Delete job ${job._id} completed`);
+  } catch (error) {
+    console.error(`[Worker] Delete job ${job._id} failed:`, error);
+    job.status = "failed";
+    job.error = error.message;
+    await job.save();
   }
 }
 
@@ -173,7 +192,11 @@ async function startWorker() {
       );
 
       if (job) {
-        await processJob(job);
+        if (job.type === "delete") {
+          await deleteJob(job);
+        } else {
+          await processJob(job);
+        }
       }
     } catch (error) {
       console.error("[Worker] Polling error:", error);

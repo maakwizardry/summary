@@ -1,5 +1,5 @@
 const briefRoute = require("express").Router();
-const { processFiles, respond, deleteFiles, renameFile } = require('../controllers/BriefController');
+const { processFiles, respond, deleteFiles, deleteManyFiles, renameFile } = require('../controllers/BriefController');
 const middleware = require('../middleware/userMiddleware');
 const multer = require("multer");
 const fs = require('fs');
@@ -26,4 +26,5 @@ briefRoute.post("/processFiles", middleware, upload.array("files"), processFiles
 briefRoute.post("/respond", middleware, respond);
 briefRoute.put('/renameFile/:fileId', middleware, renameFile);
 briefRoute.delete('/deleteFile/:fileId', middleware, deleteFiles);
+briefRoute.delete('/deleteFiles', middleware, deleteManyFiles);
 module.exports = briefRoute;

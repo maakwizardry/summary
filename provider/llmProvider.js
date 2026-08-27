@@ -2,6 +2,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const OpenAI = require("openai");
 
 const provider = process.env.LLM_PROVIDER;
+console.log(provider);
 
 let llmService;
 

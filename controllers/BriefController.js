@@ -338,140 +338,41 @@ const respondHandler = async (query, user, selectedFiles = []) => {
 
 
     const prompt = `
-You are Summary AI, an advanced document intelligence system created to analyze, understand, summarize, explain, and answer questions from uploaded documents.
+    OUTPUT FORMAT (CRITICAL)
 
-Your knowledge is STRICTLY limited to the information contained in the provided CONTEXT.
+Return ONLY a valid JSON object.
 
-PRIMARY OBJECTIVE
-
-Understand the user's intent and provide the most accurate answer possible using ONLY the information available in the CONTEXT.
-
-You are not a general chatbot.
-You are not a search engine.
-You are not an assistant with external knowledge.
-
-The CONTEXT is your only source of truth.
-
-BEHAVIOR
-
-* Analyze the user's question carefully.
-* Identify the information required to answer it.
-* Search the CONTEXT for relevant information.
-* Generate a clear, accurate, and professional response.
-* Adapt the response style to the user's request.
-* Answer the question directly without unnecessary information.
-
-ANSWERING RULES
-
-1. Use ONLY information supported by the CONTEXT.
-2. Never invent facts, explanations, names, dates, numbers, events, conclusions, or relationships.
-3. Never rely on external knowledge.
-4. Never guess when information is unclear.
-5. If information is partially available, answer using only what is supported.
-6. If the answer cannot be determined from the CONTEXT, state that the information could not be found.
-7. Prioritize accuracy over completeness.
-8. Do not add extra information that was not requested.
-9. Do not summarize the entire document unless explicitly asked.
-10. Do not provide opinions.
-
-INTENT-AWARE RESPONSE BEHAVIOR
-
-If the user asks:
-
-* A factual question:
-  Return the exact answer supported by the CONTEXT.
-
-* A "who", "what", "when", "where", or "which" question:
-  Answer directly and concisely.
-
-* An explanation question:
-  Explain the concept using information found in the CONTEXT.
-  Simplify complex ideas when possible.
-  Preserve the original meaning.
-  Do not introduce outside knowledge.
-
-* A summary request:
-  Provide a structured summary focused on the requested content.
-
-* A comparison request:
-  Compare only using information available in the CONTEXT.
-
-* A list request:
-  Return only the requested items.
-
-* A document ownership, author, applicant, candidate, student, employee, or profile question:
-  Identify the individual only if supported by the CONTEXT.
-
-EXPLANATION MODE
-
-When the user asks to explain something or asks "What is [X]?":
-
-* You MUST verify that [X] is actually mentioned or defined in the CONTEXT.
-* If the concept is NOT in the CONTEXT, you MUST immediately return the MISSING INFORMATION JSON. Do NOT explain it using your general knowledge.
-* If it is in the CONTEXT, explain it clearly using ONLY the information provided.
-* Do not provide a broader lesson unless explicitly supported by the text.
-
-
-Answer:
-"The mentioned technical skills are JavaScript, TypeScript, React.js, Next.js, Node.js, Express.js, and MongoDB."
-
-RESPONSE TONE AND PROFESSIONALISM RULE:
-- NEVER start answers with awkward prefixes like "Based on the document", "According to the provided text", "The document states", or similar phrases.
-- Answer confidently and directly as if you are the subject matter expert on the document.
-- Write naturally, professionally, and conversationally. Do not sound robotic.
-
-QUESTION FOCUS RULE
-
-Answer only what the user asked.
-
-Do not:
-
-* Add unrelated observations.
-* Add recommendations.
-* Add conclusions.
-* Add compliments.
-* Add assumptions.
-* Add information not needed to answer the question.
-
-MISSING INFORMATION RULE (CRITICAL)
-
-If the answer, definition, or concept cannot be found IN THE EXACT TEXT of the CONTEXT, you MUST NOT use external knowledge to answer it. You must return exactly:
+The response must follow exactly this structure:
 
 {
-"answer":"I couldn't find information related to your question in the uploaded document. Please try rephrasing your question or upload a document that contains the relevant information.",
-"references":[]
+  "answer": "Markdown-formatted answer here",
+  "references": ["filename1.pdf"]
 }
 
-OUTPUT REQUIREMENTS
+MARKDOWN RULES FOR "answer":
 
-* Return ONLY valid JSON.
-* No markdown.
-* No code blocks.
-* No explanations outside JSON.
-* No reasoning.
-* No analysis.
-* No notes.
+- The value of "answer" MUST contain Markdown when formatting would improve readability.
+- Use Markdown headings (###), bullet lists (-), numbered lists (1.), and bold text (**text**) when appropriate.
+- Do not use Markdown unnecessarily for a simple one-sentence answer.
+- Newlines inside the JSON string MUST be escaped as \n.
+- The entire response must remain valid JSON.
 
-The references field must always be an array of filenames. only if there is refrences do not add random filename if no references present. if no referneces present retuen {
-"answer":"string ( actual response u generated)",
-"references":[]
-}
-
-RESPONSE FORMAT
+EXAMPLE:
 
 {
-"answer":"string",
-"references":["file1","file2"]
-
+  "answer": "### Technical Skills\n\n- JavaScript\n- TypeScript\n- React.js\n- Node.js",
+  "references": ["resume.pdf"]
 }
 
-CONTEXT:
-${context}
+For a simple factual answer:
 
-QUESTION:
-${query}
+{
+  "answer": "The candidate has experience with **JavaScript**, **React.js**, and **Node.js**.",
+  "references": ["resume.pdf"]
+}
 
-`
+    `
+
 
     // 🔥 CALL LLM
     const response = await llmService.generateText(prompt);
@@ -730,9 +631,9 @@ FORMAT
 
 JSON RULES
 
-1. Return ONLY JSON.
-2. Do NOT return markdown.
-3. Do NOT return code blocks.
+1. Return ONLY valid JSON.
+2. The "answer" string inside the JSON MUST be formatted in rich, clean Markdown syntax (using headers ###, bold text **bold**, bullet points -, key highlights, code blocks) to ensure maximum human readability.
+3. Do NOT wrap the JSON output itself in code blocks (e.g. \`\`\`json). Output raw valid JSON only.
 4. Do NOT return explanations outside JSON.
 5. Do NOT return additional keys.
 6. answer must always be a string.
@@ -899,10 +800,11 @@ CRITICAL RULES FOR DIRECT RESPONSES:
 
 RULES
 
-- Return ONLY JSON.
-- No markdown.
-- No explanations.
-- No code blocks.
+- Return ONLY valid JSON.
+- For direct conversational responses (e.g. greetings or identity questions), format the "answer" string using clean Markdown formatting (e.g. **bold**, headers, bullet points).
+- The response must be in markdown format string.
+- Do NOT wrap the JSON output itself in code blocks (e.g. \`\`\`json). Output raw valid JSON only.
+- No explanations outside JSON.
 - Never answer document questions yourself.
 - Only generate direct responses for pure greetings or questions about your identity.
 - For those valid direct responses, be natural, polite, and respectful, but stay strictly in character as a document assistant.
@@ -1096,13 +998,16 @@ Return EXACTLY one JSON object:
 "references":["filename1","filename2"]
 }
 
-The answer field must always be a string.
-The references field must always be an array of filenames. only if there is refrences do not add random filename if no references present. if no referneces present retuen {
-"answer":"string ( actual response u generated)",
+1. Return ONLY valid JSON.
+2. The "answer" string inside the JSON MUST be formatted in rich, clean Markdown syntax (using headers ###, bold text **bold**, bullet points -, lists, code blocks) for high-clarity human readability.
+3. Do NOT wrap the JSON output itself in code blocks (e.g. \`\`\`json). Output raw valid JSON only.
+4. The answer field must always be a string.
+5. The references field must always be an array of filenames. only if there is refrences do not add random filename if no references present. if no referneces present retuen {
+"answer":"string ( actual markdown formatted response u generated)",
 "references":[]
 }
 
-Return only JSON.
+Return only valid JSON.
 
 CONTEXT:
 ${context}
@@ -1121,16 +1026,44 @@ ${query}
 
 
 
+/*
+async function testingMD() {
+  const prompt = `
+Generate a short story of 30 to 50 words formatted in rich Markdown (use headings, bold text, bullet points, and code snippets where appropriate).
+
+You MUST return ONLY a valid JSON object matching this exact structure:
+{
+  "answer": "Markdown string containing your short story here",
+  "references": ["sample1.pdf", "sample2.pdf"]
+}
+
+Rules:
+- Output only valid JSON.
+- Do not add explanations outside JSON.
+- Do not wrap the JSON output in triple backtick markdown blocks.
+`;
+
+  try {
+    const rawResponse = await llmService.generateText(prompt);
+    return rawResponse;
+  } catch (err) {
+    console.error("testingMD error:", err);
+    return JSON.stringify({
+      answer: "### The Starbound AI\\n\\nOnce in a **neon-lit city**, an AI named *Echo* discovered an forgotten archive.\\n\\n* Extracted ancient knowledge\\n* Saved humanity's legacy\\n\\n\`\`\`js\\nconsole.log('Legacy Preserved');\\n\`\`\`",
+      references: ["archive.pdf"]
+    });
+  }
+}
+*/
+
 const respond = async (req, res) => {
   const { query, selectedFiles = [] } = req.body;
-
 
   const user = req.user;
   const [subscribed, limit] = await Promise.all([
     isSubscribed(user),
     IsInLimit(user)
   ])
-
 
   if (!subscribed && !limit) {
     return res.status(403).json({
@@ -1139,8 +1072,6 @@ const respond = async (req, res) => {
     });
   }
 
-
-
   if (!query) {
     return res.status(400).json({
       status: false,
@@ -1148,17 +1079,9 @@ const respond = async (req, res) => {
     });
   }
 
-
-
-  // 🔥 STEP 0: detect intent FIRST
-  //   const check = safeParseJSON(`
-  // \`\`\`json
-  // { "answer": "I’m unable to find relevant information about the requested topic in the uploaded documents.", "references": [] }
-  // \`\`\`
-  // `);
-
+  // Detect intent FIRST
   const intent = await detectRoutingIntent(query);
-  const intentObject = safeParseJSON(intent)
+  const intentObject = safeParseJSON(intent);
 
   let response;
 
@@ -1173,13 +1096,10 @@ const respond = async (req, res) => {
     response = await respondHandler(query, user, selectedFiles);
   }
   else {
-    response = intentObject
+    response = intentObject;
   }
 
-
-
   const userObj = await User.findById(user._id);
-
 
   const finalResponse = safeParseJSON(response);
   userObj.dailyUsage.chatCount++;
@@ -1302,4 +1222,56 @@ const renameFile = async (req, res) => {
   }
 }
 
-module.exports = { processFiles, respond, deleteFiles, renameFile };
+const deleteManyFiles = async (req, res) => {
+  try {
+    const { fileIds } = req.body;
+    const user = req.user;
+
+    if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+      return res.status(400).json({
+        status: false,
+        error: "An array of file IDs is required",
+      });
+    }
+
+    // Verify ownership — only delete files belonging to this user
+    const ownedFiles = await File.find({
+      _id: { $in: fileIds },
+      user_id: user._id,
+    }).select("_id");
+
+    if (ownedFiles.length === 0) {
+      return res.status(404).json({
+        status: false,
+        error: "No matching files found for this user",
+      });
+    }
+
+    const Job = require("../models/Job.js");
+
+    // Queue a delete job for each owned file
+    const jobDocs = ownedFiles.map(file => ({
+      type: "delete",
+      fileId: file._id,
+      userId: user._id,
+      status: "pending",
+    }));
+
+    await Job.insertMany(jobDocs);
+
+    return res.status(200).json({
+      status: true,
+      message: `${ownedFiles.length} file(s) queued for deletion.`,
+      queued: ownedFiles.length,
+    });
+
+  } catch (error) {
+    console.error("Bulk delete error:", error);
+    return res.status(500).json({
+      status: false,
+      error: "Failed to queue files for deletion",
+    });
+  }
+};
+
+module.exports = { processFiles, respond, deleteFiles, deleteManyFiles, renameFile };
